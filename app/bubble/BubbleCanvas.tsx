@@ -7,8 +7,8 @@ import {
   useRef,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import type { CameraOrbit, SimulationParameters } from "./model";
-import { screenNormalToSphereUv } from "./model";
+import type { CameraOrbit, SimulationParameters, Vector3 } from "./model";
+import { screenNormalToWorldDirection } from "./model";
 import { displayShader, simulationShader, vertexShader } from "./shaders";
 import {
   createInitialState,
@@ -28,10 +28,8 @@ type BubbleCanvasProps = {
 };
 
 type FilmPointer = {
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
+  direction: Vector3;
+  velocity: Vector3;
   down: number;
   lastTime: number;
 };
@@ -43,14 +41,14 @@ type Interaction = {
 };
 
 const SIMULATION_UNIFORMS = [
-  "u_state", "u_texel", "u_dt", "u_gravity", "u_surfaceTension",
-  "u_viscosity", "u_marangoni", "u_diffusion", "u_pointer",
-  "u_pointerVelocity", "u_pointerDown",
+  "u_state", "u_faceTexel", "u_angularStep", "u_dt", "u_gravity",
+  "u_surfaceTension", "u_viscosity", "u_marangoni", "u_diffusion",
+  "u_pointerDirection", "u_pointerVelocity", "u_pointerDown",
 ] as const;
 
 const DISPLAY_UNIFORMS = [
-  "u_state", "u_resolution", "u_stateTexel", "u_time", "u_cameraOrbit",
-  "u_thickness", "u_variation", "u_ior", "u_saturation",
+  "u_state", "u_faceTexel", "u_angularStep", "u_resolution", "u_time",
+  "u_cameraOrbit", "u_thickness", "u_variation", "u_ior", "u_saturation",
 ] as const;
 
 export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
@@ -61,7 +59,7 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
     const resetSimulationRef = useRef<() => void>(() => {});
     const cameraOrbitRef = useRef<CameraOrbit>({ yaw: 0, pitch: 0 });
     const filmPointerRef = useRef<FilmPointer>({
-      x: 0.5, y: 0.5, vx: 0, vy: 0, down: 0, lastTime: 0,
+      direction: [0, 0, 1], velocity: [0, 0, 0], down: 0, lastTime: 0,
     });
     const interactionRef = useRef<Interaction>({
       mode: null, lastClientX: 0, lastClientY: 0,
@@ -99,14 +97,15 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
         }
 
         const mobile = window.innerWidth < 700;
-        const simulationSize = mobile ? 144 : 192;
+        const faceSize = mobile ? 52 : 72;
+        const angularStep = 1.75 / faceSize;
         const usesFloatState = Boolean(gl.getExtension("EXT_color_buffer_float"));
-        const initialFloatState = createInitialState(simulationSize);
-        const initialByteState = new Uint8Array(initialFloatState.length);
-        for (let index = 0; index < initialFloatState.length; index += 1) {
-          initialByteState[index] = Math.round(Math.max(0, Math.min(1, initialFloatState[index])) * 255);
+        const initial = createInitialState(faceSize);
+        const initialByteState = new Uint8Array(initial.state.length);
+        for (let index = 0; index < initial.state.length; index += 1) {
+          initialByteState[index] = Math.round(Math.max(0, Math.min(1, initial.state[index])) * 255);
         }
-        const initialState = usesFloatState ? initialFloatState : initialByteState;
+        const initialState = usesFloatState ? initial.state : initialByteState;
         const internalFormat = usesFloatState ? gl.RGBA16F : gl.RGBA8;
         const stateType = usesFloatState ? gl.FLOAT : gl.UNSIGNED_BYTE;
         const textures = [gl.createTexture(), gl.createTexture()];
@@ -119,10 +118,10 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
           gl.bindTexture(gl.TEXTURE_2D, texture);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
           gl.texImage2D(
-            gl.TEXTURE_2D, 0, internalFormat, simulationSize, simulationSize,
+            gl.TEXTURE_2D, 0, internalFormat, initial.width, initial.height,
             0, gl.RGBA, stateType, initialState,
           );
           gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffers[index]);
@@ -139,7 +138,7 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
           for (const texture of textures) {
             gl.bindTexture(gl.TEXTURE_2D, texture);
             gl.texSubImage2D(
-              gl.TEXTURE_2D, 0, 0, 0, simulationSize, simulationSize,
+              gl.TEXTURE_2D, 0, 0, 0, initial.width, initial.height,
               gl.RGBA, stateType, initialState,
             );
           }
@@ -176,28 +175,27 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
             const stepDuration = acceleratedElapsed / substeps;
             gl.useProgram(simulationProgram);
             gl.bindVertexArray(vertexArray);
-            gl.viewport(0, 0, simulationSize, simulationSize);
+            gl.viewport(0, 0, initial.width, initial.height);
             gl.activeTexture(gl.TEXTURE0);
             gl.uniform1i(simulationUniforms.u_state, 0);
-            gl.uniform2f(
-              simulationUniforms.u_texel,
-              1 / simulationSize,
-              1 / simulationSize,
-            );
+            gl.uniform1f(simulationUniforms.u_faceTexel, 1 / faceSize);
+            gl.uniform1f(simulationUniforms.u_angularStep, angularStep);
             gl.uniform1f(simulationUniforms.u_gravity, current.gravity);
             gl.uniform1f(simulationUniforms.u_surfaceTension, current.surfaceTension);
             gl.uniform1f(simulationUniforms.u_viscosity, current.viscosity);
             gl.uniform1f(simulationUniforms.u_marangoni, current.marangoni);
             gl.uniform1f(simulationUniforms.u_diffusion, current.surfactantDiffusion);
-            gl.uniform2f(
-              simulationUniforms.u_pointer,
-              filmPointerRef.current.x,
-              filmPointerRef.current.y,
+            gl.uniform3f(
+              simulationUniforms.u_pointerDirection,
+              filmPointerRef.current.direction[0],
+              filmPointerRef.current.direction[1],
+              filmPointerRef.current.direction[2],
             );
-            gl.uniform2f(
+            gl.uniform3f(
               simulationUniforms.u_pointerVelocity,
-              filmPointerRef.current.vx,
-              filmPointerRef.current.vy,
+              filmPointerRef.current.velocity[0],
+              filmPointerRef.current.velocity[1],
+              filmPointerRef.current.velocity[2],
             );
             gl.uniform1f(simulationUniforms.u_pointerDown, filmPointerRef.current.down);
 
@@ -209,8 +207,12 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
               gl.drawArrays(gl.TRIANGLES, 0, 6);
               readIndex = 1 - readIndex;
             }
-            filmPointerRef.current.vx *= 0.72;
-            filmPointerRef.current.vy *= 0.72;
+            const velocity = filmPointerRef.current.velocity;
+            filmPointerRef.current.velocity = [
+              velocity[0] * 0.72,
+              velocity[1] * 0.72,
+              velocity[2] * 0.72,
+            ];
           }
 
           gl.useProgram(displayProgram);
@@ -220,12 +222,9 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
           gl.activeTexture(gl.TEXTURE0);
           gl.bindTexture(gl.TEXTURE_2D, textures[readIndex]);
           gl.uniform1i(displayUniforms.u_state, 0);
+          gl.uniform1f(displayUniforms.u_faceTexel, 1 / faceSize);
+          gl.uniform1f(displayUniforms.u_angularStep, angularStep);
           gl.uniform2f(displayUniforms.u_resolution, canvas.width, canvas.height);
-          gl.uniform2f(
-            displayUniforms.u_stateTexel,
-            1 / simulationSize,
-            1 / simulationSize,
-          );
           gl.uniform1f(displayUniforms.u_time, simulationTime);
           gl.uniform2f(
             displayUniforms.u_cameraOrbit,
@@ -275,22 +274,41 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
       const normalX = qx / radius;
       const normalY = qy / radius;
       const normalZ = Math.sqrt(Math.max(0, 1 - radial));
-      const [x, y] = screenNormalToSphereUv(
+      const direction = screenNormalToWorldDirection(
         [normalX, normalY, normalZ],
         cameraOrbitRef.current,
       );
       const previous = filmPointerRef.current;
       const eventTime = event.timeStamp / 1000;
       const deltaTime = Math.max(0.008, eventTime - previous.lastTime);
-      let deltaX = x - previous.x;
-      if (deltaX > 0.5) deltaX -= 1;
-      if (deltaX < -0.5) deltaX += 1;
       const active = (down ?? previous.down) > 0 && previous.lastTime > 0;
+      const delta: Vector3 = [
+        direction[0] - previous.direction[0],
+        direction[1] - previous.direction[1],
+        direction[2] - previous.direction[2],
+      ];
+      const radialDelta = delta[0] * direction[0]
+        + delta[1] * direction[1]
+        + delta[2] * direction[2];
+      const tangentDelta: Vector3 = [
+        delta[0] - direction[0] * radialDelta,
+        delta[1] - direction[1] * radialDelta,
+        delta[2] - direction[2] * radialDelta,
+      ];
+      const rawVelocity: Vector3 = active ? [
+        tangentDelta[0] / deltaTime,
+        tangentDelta[1] / deltaTime,
+        tangentDelta[2] / deltaTime,
+      ] : [0, 0, 0];
+      const speed = Math.hypot(rawVelocity[0], rawVelocity[1], rawVelocity[2]);
+      const velocityScale = speed > 0.28 ? 0.28 / speed : 1;
       filmPointerRef.current = {
-        x,
-        y,
-        vx: active ? Math.max(-0.28, Math.min(0.28, deltaX / deltaTime)) : 0,
-        vy: active ? Math.max(-0.28, Math.min(0.28, (y - previous.y) / deltaTime)) : 0,
+        direction,
+        velocity: [
+          rawVelocity[0] * velocityScale,
+          rawVelocity[1] * velocityScale,
+          rawVelocity[2] * velocityScale,
+        ],
         down: down ?? previous.down,
         lastTime: eventTime,
       };

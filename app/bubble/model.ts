@@ -18,6 +18,8 @@ export type CameraOrbit = {
   pitch: number;
 };
 
+export type Vector3 = readonly [number, number, number];
+
 export const DEFAULT_PARAMETERS: SimulationParameters = {
   thickness: 520,
   variation: 360,
@@ -57,10 +59,10 @@ export function parametersForPreset(name: PresetName): SimulationParameters {
   };
 }
 
-export function screenNormalToSphereUv(
-  normal: readonly [number, number, number],
+export function screenNormalToWorldDirection(
+  normal: Vector3,
   orbit: CameraOrbit,
-): readonly [number, number] {
+): Vector3 {
   const [x, y, z] = normal;
   const cosPitch = Math.cos(orbit.pitch);
   const sinPitch = Math.sin(orbit.pitch);
@@ -70,7 +72,5 @@ export function screenNormalToSphereUv(
   const sinYaw = Math.sin(orbit.yaw);
   const worldX = cosYaw * x + sinYaw * pitchedZ;
   const worldZ = -sinYaw * x + cosYaw * pitchedZ;
-  const longitude = Math.atan2(worldX, worldZ) / (Math.PI * 2) + 0.5;
-  const latitude = Math.asin(Math.max(-1, Math.min(1, pitchedY))) / Math.PI + 0.5;
-  return [longitude - Math.floor(longitude), latitude];
+  return [worldX, pitchedY, worldZ];
 }

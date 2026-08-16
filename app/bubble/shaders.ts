@@ -1,3 +1,75 @@
+const cubeSphereMapping = `
+vec3 cubeVector(int face, vec2 st) {
+  if (face == 0) return vec3(1.0, st.y, -st.x);
+  if (face == 1) return vec3(-1.0, st.y, st.x);
+  if (face == 2) return vec3(st.x, 1.0, -st.y);
+  if (face == 3) return vec3(st.x, -1.0, st.y);
+  if (face == 4) return vec3(st.x, st.y, 1.0);
+  return vec3(-st.x, st.y, -1.0);
+}
+
+int directionFace(vec3 direction) {
+  vec3 magnitude = abs(direction);
+  if (magnitude.x >= magnitude.y && magnitude.x >= magnitude.z) {
+    return direction.x >= 0.0 ? 0 : 1;
+  }
+  if (magnitude.y >= magnitude.z) return direction.y >= 0.0 ? 2 : 3;
+  return direction.z >= 0.0 ? 4 : 5;
+}
+
+vec2 faceTile(int face) {
+  return vec2(float(face % 3), float(face / 3));
+}
+
+vec3 atlasDirection(vec2 atlasUv, out int face) {
+  vec2 tiled = atlasUv * vec2(3.0, 2.0);
+  ivec2 tile = ivec2(floor(tiled));
+  face = tile.x + tile.y * 3;
+  vec2 localUv = fract(tiled);
+  return normalize(cubeVector(face, localUv * 2.0 - 1.0));
+}
+
+vec2 directionAtlasUv(vec3 direction, out int face) {
+  face = directionFace(direction);
+  vec3 magnitude = abs(direction);
+  vec2 st;
+  if (face == 0) st = vec2(-direction.z, direction.y) / magnitude.x;
+  else if (face == 1) st = vec2(direction.z, direction.y) / magnitude.x;
+  else if (face == 2) st = vec2(direction.x, -direction.z) / magnitude.y;
+  else if (face == 3) st = vec2(direction.x, direction.z) / magnitude.y;
+  else if (face == 4) st = vec2(direction.x, direction.y) / magnitude.z;
+  else st = vec2(-direction.x, direction.y) / magnitude.z;
+  vec2 localUv = clamp(
+    st * 0.5 + 0.5,
+    vec2(0.5 * u_faceTexel),
+    vec2(1.0 - 0.5 * u_faceTexel)
+  );
+  return (faceTile(face) + localUv) / vec2(3.0, 2.0);
+}
+
+vec4 stateAtDirection(vec3 direction, out int face) {
+  return texture(u_state, directionAtlasUv(normalize(direction), face));
+}
+
+vec4 stateAtDirection(vec3 direction) {
+  int face;
+  return stateAtDirection(direction, face);
+}
+
+void faceBasis(vec3 normal, int face, out vec3 tangentA, out vec3 tangentB) {
+  vec3 faceDerivative = face == 0 ? vec3(0.0, 0.0, -1.0)
+    : face == 1 ? vec3(0.0, 0.0, 1.0)
+    : face == 5 ? vec3(-1.0, 0.0, 0.0)
+    : vec3(1.0, 0.0, 0.0);
+  tangentA = normalize(faceDerivative - normal * dot(faceDerivative, normal));
+  tangentB = normalize(cross(normal, tangentA));
+}
+
+vec3 sphereOffset(vec3 normal, vec3 tangent, float distance) {
+  return normalize(normal * cos(distance) + normalize(tangent) * sin(distance));
+}
+`;
+
 export const vertexShader = `#version 300 es
 in vec2 a_position;
 out vec2 v_uv;
@@ -13,179 +85,168 @@ in vec2 v_uv;
 out vec4 outColor;
 
 uniform sampler2D u_state;
-uniform vec2 u_texel;
+uniform float u_faceTexel;
+uniform float u_angularStep;
 uniform float u_dt;
 uniform float u_gravity;
 uniform float u_surfaceTension;
 uniform float u_viscosity;
 uniform float u_marangoni;
 uniform float u_diffusion;
-uniform vec2 u_pointer;
-uniform vec2 u_pointerVelocity;
+uniform vec3 u_pointerDirection;
+uniform vec3 u_pointerVelocity;
 uniform float u_pointerDown;
 
-const float PI = 3.14159265359;
-const float TWO_PI = 6.28318530718;
 const float VMAX = 0.28;
 
-vec2 sphereUv(vec2 uv) {
-  float x = uv.x;
-  float y = uv.y;
-  if (y < 0.0) { y = -y; x += 0.5; }
-  if (y > 1.0) { y = 2.0 - y; x += 0.5; }
-  return vec2(fract(x), clamp(y, 0.0, 1.0));
-}
+${cubeSphereMapping}
 
-vec4 sampleSphere(vec2 uv) {
-  return texture(u_state, sphereUv(uv));
-}
-
-vec2 decodeVelocity(vec4 state) {
+vec2 decodeVelocityComponents(vec4 state) {
   return (state.gb * 2.0 - 1.0) * VMAX;
 }
 
-vec2 encodeVelocity(vec2 velocity) {
-  return clamp(velocity / VMAX * 0.5 + 0.5, 0.0, 1.0);
+vec3 velocityAtDirection(vec3 direction) {
+  int face;
+  vec4 state = stateAtDirection(direction, face);
+  vec3 tangentA;
+  vec3 tangentB;
+  faceBasis(direction, face, tangentA, tangentB);
+  vec2 components = decodeVelocityComponents(state);
+  return tangentA * components.x + tangentB * components.y;
 }
 
-float rawMetric(float y) {
-  return max(0.0, sin(PI * clamp(y, 0.0, 1.0)));
+vec3 parallelTransport(vec3 vector, vec3 from, vec3 to) {
+  return vector - (dot(vector, to) / max(1.0 + dot(from, to), 0.0001)) * (from + to);
 }
 
-float metric(float y) {
-  // A longitude cell has finite width at the first cell center. Clamping to
-  // that footprint regularizes the unavoidable latitude-longitude pole.
-  return max(rawMetric(y), max(0.065, TWO_PI * u_texel.x * 1.5));
+vec2 encodeVelocity(vec3 velocity, vec3 normal, int face) {
+  vec3 tangentA;
+  vec3 tangentB;
+  faceBasis(normal, face, tangentA, tangentB);
+  vec2 components = vec2(dot(velocity, tangentA), dot(velocity, tangentB));
+  return clamp(components / VMAX * 0.5 + 0.5, 0.0, 1.0);
 }
 
-vec2 coordinateVelocity(vec2 physicalVelocity, vec2 uv) {
-  return vec2(
-    physicalVelocity.x / (TWO_PI * metric(uv.y)),
-    physicalVelocity.y / PI
-  );
+float heightAt(vec3 direction) { return stateAtDirection(direction).r; }
+float surfactantAt(vec3 direction) { return stateAtDirection(direction).a; }
+
+float laplaceHeight(vec3 normal) {
+  int face = directionFace(normal);
+  vec3 tangentA;
+  vec3 tangentB;
+  faceBasis(normal, face, tangentA, tangentB);
+  float center = heightAt(normal);
+  float neighbors = heightAt(sphereOffset(normal, tangentA, u_angularStep));
+  neighbors += heightAt(sphereOffset(normal, -tangentA, u_angularStep));
+  neighbors += heightAt(sphereOffset(normal, tangentB, u_angularStep));
+  neighbors += heightAt(sphereOffset(normal, -tangentB, u_angularStep));
+  return (neighbors - 4.0 * center) / (u_angularStep * u_angularStep);
 }
 
-float heightAt(vec2 uv) { return sampleSphere(uv).r; }
-float surfactantAt(vec2 uv) { return sampleSphere(uv).a; }
-vec2 velocityAt(vec2 uv) { return decodeVelocity(sampleSphere(uv)); }
-
-float laplaceBeltramiHeight(vec2 uv) {
-  float h = heightAt(uv);
-  float hL = heightAt(uv - vec2(u_texel.x, 0.0));
-  float hR = heightAt(uv + vec2(u_texel.x, 0.0));
-  float hB = heightAt(uv - vec2(0.0, u_texel.y));
-  float hT = heightAt(uv + vec2(0.0, u_texel.y));
-  float m = metric(uv.y);
-  float mB = metric(uv.y - 0.5 * u_texel.y);
-  float mT = metric(uv.y + 0.5 * u_texel.y);
-  float lonScale = TWO_PI * u_texel.x * m;
-  float latScale = PI * u_texel.y;
-  float lon = (hL + hR - 2.0 * h) / (lonScale * lonScale);
-  float lat = (mT * (hT - h) - mB * (h - hB)) / (m * latScale * latScale);
-  return lon + lat;
+float laplaceSurfactant(
+  vec3 normal,
+  vec3 tangentA,
+  vec3 tangentB,
+  vec3 directionL,
+  vec3 directionR,
+  vec3 directionB,
+  vec3 directionT
+) {
+  float neighbors = surfactantAt(directionL) + surfactantAt(directionR)
+    + surfactantAt(directionB) + surfactantAt(directionT);
+  return (neighbors - 4.0 * surfactantAt(normal))
+    / (u_angularStep * u_angularStep);
 }
 
-float laplaceBeltramiSurfactant(vec2 uv) {
-  float c = surfactantAt(uv);
-  float cL = surfactantAt(uv - vec2(u_texel.x, 0.0));
-  float cR = surfactantAt(uv + vec2(u_texel.x, 0.0));
-  float cB = surfactantAt(uv - vec2(0.0, u_texel.y));
-  float cT = surfactantAt(uv + vec2(0.0, u_texel.y));
-  float m = metric(uv.y);
-  float mB = metric(uv.y - 0.5 * u_texel.y);
-  float mT = metric(uv.y + 0.5 * u_texel.y);
-  float lonScale = TWO_PI * u_texel.x * m;
-  float latScale = PI * u_texel.y;
-  float lon = (cL + cR - 2.0 * c) / (lonScale * lonScale);
-  float lat = (mT * (cT - c) - mB * (c - cB)) / (m * latScale * latScale);
-  return lon + lat;
+vec3 clampMagnitude(vec3 vector, float limit) {
+  float magnitude = length(vector);
+  return magnitude > limit ? vector * (limit / magnitude) : vector;
+}
+
+vec3 backtrace(vec3 normal, vec3 velocity, float duration) {
+  float speed = length(velocity);
+  if (speed < 0.000001) return normal;
+  return sphereOffset(normal, -velocity / speed, duration * speed);
 }
 
 void main() {
-  vec2 uv = v_uv;
-  vec4 center = sampleSphere(uv);
-  vec4 stateL = sampleSphere(uv - vec2(u_texel.x, 0.0));
-  vec4 stateR = sampleSphere(uv + vec2(u_texel.x, 0.0));
-  vec4 stateB = sampleSphere(uv - vec2(0.0, u_texel.y));
-  vec4 stateT = sampleSphere(uv + vec2(0.0, u_texel.y));
+  int currentFace;
+  vec3 normal = atlasDirection(v_uv, currentFace);
+  vec3 tangentA;
+  vec3 tangentB;
+  faceBasis(normal, currentFace, tangentA, tangentB);
 
-  float h = center.r;
-  vec2 velocity = decodeVelocity(center);
-  vec2 velocityL = decodeVelocity(stateL);
-  vec2 velocityR = decodeVelocity(stateR);
-  vec2 velocityB = decodeVelocity(stateB);
-  vec2 velocityT = decodeVelocity(stateT);
-  float m = metric(uv.y);
-  float mB = metric(uv.y - 0.5 * u_texel.y);
-  float mT = metric(uv.y + 0.5 * u_texel.y);
+  vec3 directionL = sphereOffset(normal, -tangentA, u_angularStep);
+  vec3 directionR = sphereOffset(normal, tangentA, u_angularStep);
+  vec3 directionB = sphereOffset(normal, -tangentB, u_angularStep);
+  vec3 directionT = sphereOffset(normal, tangentB, u_angularStep);
+  vec4 center = stateAtDirection(normal);
+  vec4 stateL = stateAtDirection(directionL);
+  vec4 stateR = stateAtDirection(directionR);
+  vec4 stateB = stateAtDirection(directionB);
+  vec4 stateT = stateAtDirection(directionT);
 
-  // Intrinsic surface divergence: div_s(u) = 1/sqrt(g) d_i(sqrt(g) u^i).
-  float divVelocity = (velocityR.x - velocityL.x) / (2.0 * TWO_PI * u_texel.x * m);
-  divVelocity += (mT * velocityT.y - mB * velocityB.y) / (2.0 * PI * u_texel.y * m);
+  vec3 velocity = velocityAtDirection(normal);
+  vec3 velocityL = parallelTransport(velocityAtDirection(directionL), directionL, normal);
+  vec3 velocityR = parallelTransport(velocityAtDirection(directionR), directionR, normal);
+  vec3 velocityB = parallelTransport(velocityAtDirection(directionB), directionB, normal);
+  vec3 velocityT = parallelTransport(velocityAtDirection(directionT), directionT, normal);
+  float inverseDiameter = 0.5 / u_angularStep;
+  float divergence = dot(velocityR - velocityL, tangentA) * inverseDiameter
+    + dot(velocityT - velocityB, tangentB) * inverseDiameter;
 
-  vec2 gradSurfactant = vec2(
-    (stateR.a - stateL.a) / (2.0 * TWO_PI * u_texel.x * m),
-    (stateT.a - stateB.a) / (2.0 * PI * u_texel.y)
-  );
-  vec2 gradLapHeight = vec2(
-    (laplaceBeltramiHeight(uv + vec2(u_texel.x, 0.0))
-      - laplaceBeltramiHeight(uv - vec2(u_texel.x, 0.0)))
-      / (2.0 * TWO_PI * u_texel.x * m),
-    (laplaceBeltramiHeight(uv + vec2(0.0, u_texel.y))
-      - laplaceBeltramiHeight(uv - vec2(0.0, u_texel.y)))
-      / (2.0 * PI * u_texel.y)
-  );
+  vec3 gradSurfactant = tangentA * (stateR.a - stateL.a) * inverseDiameter
+    + tangentB * (stateT.a - stateB.a) * inverseDiameter;
+  vec3 gradLapHeight = tangentA
+    * (laplaceHeight(directionR) - laplaceHeight(directionL)) * inverseDiameter;
+  gradLapHeight += tangentB
+    * (laplaceHeight(directionT) - laplaceHeight(directionB)) * inverseDiameter;
+  vec3 lapVelocity = (velocityL + velocityR + velocityB + velocityT - 4.0 * velocity)
+    / (u_angularStep * u_angularStep);
 
-  float lonScale = TWO_PI * u_texel.x * m;
-  float latScale = PI * u_texel.y;
-  vec2 lapVelocity = (velocityL + velocityR - 2.0 * velocity) / (lonScale * lonScale);
-  lapVelocity += (mT * (velocityT - velocity) - mB * (velocity - velocityB))
-    / (m * latScale * latScale);
-
-  // Reduced tangential momentum. The stored scalar is insoluble surfactant
-  // concentration, so surface tension falls along +grad(c) and Marangoni flow
-  // accelerates toward -grad(c). Capillary pressure contributes grad(Delta h).
-  vec2 force = -u_marangoni * 0.055 * gradSurfactant / max(h, 0.05);
-  force += u_surfaceTension * 0.00085 * h * h * gradLapHeight;
+  float height = center.r;
+  vec3 force = -u_marangoni * 0.055 * gradSurfactant / max(height, 0.05);
+  force += u_surfaceTension * 0.00085 * height * height * gradLapHeight;
   force += u_viscosity * 0.00042 * lapVelocity;
-  force.y -= u_gravity * 0.052 * cos(PI * (uv.y - 0.5));
+  force += u_gravity * 0.052 * (vec3(0.0, -1.0, 0.0) + normal * normal.y);
 
-  vec2 pointerDelta = uv - u_pointer;
-  pointerDelta.x = mod(pointerDelta.x + 0.5, 1.0) - 0.5;
-  float pointerInfluence = exp(-dot(pointerDelta, pointerDelta) * 82.0) * u_pointerDown;
-  force += u_pointerVelocity * pointerInfluence * 2.2;
-  force = clamp(force, vec2(-0.62), vec2(0.62));
+  float pointerInfluence = exp(-(1.0 - dot(normal, u_pointerDirection)) * 42.0)
+    * u_pointerDown;
+  force += parallelTransport(u_pointerVelocity, u_pointerDirection, normal)
+    * pointerInfluence * 2.2;
+  force = clampMagnitude(force - normal * dot(force, normal), 0.62);
 
-  // Midpoint semi-Lagrangian characteristic tracing remains stable at the
-  // larger time increments needed for accelerated real-time playback.
-  vec2 halfVelocity = velocity + 0.5 * u_dt * force;
-  vec2 midpoint = sphereUv(uv - 0.5 * u_dt * coordinateVelocity(halfVelocity, uv));
-  vec2 midpointVelocity = velocityAt(midpoint);
-  vec2 source = sphereUv(uv - u_dt * coordinateVelocity(midpointVelocity, midpoint));
-  vec4 advected = sampleSphere(source);
+  vec3 halfVelocity = velocity + 0.5 * u_dt * force;
+  vec3 midpoint = backtrace(normal, halfVelocity, 0.5 * u_dt);
+  vec3 midpointVelocity = parallelTransport(velocityAtDirection(midpoint), midpoint, normal);
+  vec3 sourceDirection = backtrace(normal, midpointVelocity, u_dt);
+  int sourceFace;
+  vec4 advected = stateAtDirection(sourceDirection, sourceFace);
+  vec3 sourceTangentA;
+  vec3 sourceTangentB;
+  faceBasis(sourceDirection, sourceFace, sourceTangentA, sourceTangentB);
+  vec2 sourceComponents = decodeVelocityComponents(advected);
+  vec3 sourceVelocity = sourceTangentA * sourceComponents.x
+    + sourceTangentB * sourceComponents.y;
+  vec3 newVelocity = parallelTransport(sourceVelocity, sourceDirection, normal) + u_dt * force;
+  float viscousDrag = exp(-u_viscosity * u_dt
+    * (0.14 + 0.016 / max(height * height, 0.01)));
+  newVelocity = clampMagnitude(newVelocity * viscousDrag, VMAX);
 
-  vec2 newVelocity = decodeVelocity(advected) + u_dt * force;
-  float viscousDrag = exp(-u_viscosity * u_dt * (0.14 + 0.016 / max(h * h, 0.01)));
-  newVelocity *= viscousDrag;
-
-  // Advective form of d_t h + div_s(h u) = 0 and
-  // d_t c + div_s(c u) = D Delta_s c. Exponential area change preserves
-  // positivity and avoids the central-flux checkerboard at large time scales.
-  float areaScale = exp(clamp(-u_dt * divVelocity, -0.12, 0.12));
+  float areaScale = exp(clamp(-u_dt * divergence, -0.12, 0.12));
   float newHeight = advected.r * areaScale;
   float newSurfactant = advected.a * areaScale;
-  newSurfactant += u_dt * u_diffusion * 0.00016 * laplaceBeltramiSurfactant(uv);
+  newSurfactant += u_dt * u_diffusion * 0.00016 * laplaceSurfactant(
+    normal, tangentA, tangentB, directionL, directionR, directionB, directionT
+  );
 
-  // Longitude degenerates to one physical point at each pole. Damp only the
-  // unresolvable zonal component within the top/bottom cell footprint.
-  float polarWeight = 1.0 - smoothstep(0.06, 0.16, rawMetric(uv.y));
-  newVelocity.x *= exp(-polarWeight * u_dt * 24.0);
-  newVelocity = clamp(newVelocity, vec2(-VMAX), vec2(VMAX));
-
-  // The floor is the common-black-film scale; there is no island mask.
   newHeight = clamp(newHeight, 0.018, 0.98);
   newSurfactant = clamp(newSurfactant, 0.08, 0.92);
-  outColor = vec4(newHeight, encodeVelocity(newVelocity), newSurfactant);
+  outColor = vec4(
+    newHeight,
+    encodeVelocity(newVelocity, normal, currentFace),
+    newSurfactant
+  );
 }`;
 
 export const displayShader = `#version 300 es
@@ -194,8 +255,9 @@ in vec2 v_uv;
 out vec4 outColor;
 
 uniform sampler2D u_state;
+uniform float u_faceTexel;
+uniform float u_angularStep;
 uniform vec2 u_resolution;
-uniform vec2 u_stateTexel;
 uniform float u_time;
 uniform vec2 u_cameraOrbit;
 uniform float u_thickness;
@@ -207,12 +269,10 @@ const float PI = 3.14159265359;
 const float TWO_PI = 6.28318530718;
 const float BUBBLE_RADIUS_METERS = 0.022;
 
+${cubeSphereMapping}
+
 float hash(vec2 p) {
   return fract(sin(dot(p, vec2(41.31, 289.97))) * 9173.21);
-}
-
-vec4 sphereState(vec2 uv) {
-  return texture(u_state, vec2(fract(uv.x), clamp(uv.y, 0.0, 1.0)));
 }
 
 vec3 rotateX(vec3 p, float angle) {
@@ -234,7 +294,8 @@ float airyReflectance(float interfaceR, float beta) {
 }
 
 float filmReflectance(float lambda, float thickness, float cosIncident) {
-  float sinTransmitted2 = max(0.0, 1.0 - cosIncident * cosIncident) / (u_ior * u_ior);
+  float sinTransmitted2 = max(0.0, 1.0 - cosIncident * cosIncident)
+    / (u_ior * u_ior);
   float cosTransmitted = sqrt(max(0.0001, 1.0 - sinTransmitted2));
   float rs = (cosIncident - u_ior * cosTransmitted)
     / max(cosIncident + u_ior * cosTransmitted, 0.0001);
@@ -270,7 +331,6 @@ void main() {
   float glow = exp(-dot(q - vec2(-0.22, 0.18), q - vec2(-0.22, 0.18)) * 3.2);
   backdrop += vec3(0.014, 0.026, 0.041) * glow;
   backdrop += (grain - 0.5) * 0.004;
-
   if (r2 > 1.0) {
     outColor = vec4(backdrop, 1.0);
     return;
@@ -279,48 +339,36 @@ void main() {
   float z = sqrt(max(0.0, 1.0 - r2));
   vec3 screenNormal = normalize(vec3(q / radius, z));
   vec3 worldNormal = rotateY(rotateX(screenNormal, u_cameraOrbit.y), u_cameraOrbit.x);
-  vec3 viewDir = rotateY(rotateX(vec3(0.0, 0.0, 1.0), u_cameraOrbit.y), u_cameraOrbit.x);
-  vec2 bubbleUv = vec2(
-    fract(atan(worldNormal.x, worldNormal.z) / TWO_PI + 0.5),
-    asin(clamp(worldNormal.y, -1.0, 1.0)) / PI + 0.5
+  vec3 viewDir = rotateY(
+    rotateX(vec3(0.0, 0.0, 1.0), u_cameraOrbit.y),
+    u_cameraOrbit.x
   );
+  vec4 state = stateAtDirection(worldNormal);
+  int currentFace = directionFace(worldNormal);
+  vec3 tangentA;
+  vec3 tangentB;
+  faceBasis(worldNormal, currentFace, tangentA, tangentB);
+  float hL = stateAtDirection(sphereOffset(worldNormal, -tangentA, u_angularStep)).r;
+  float hR = stateAtDirection(sphereOffset(worldNormal, tangentA, u_angularStep)).r;
+  float hB = stateAtDirection(sphereOffset(worldNormal, -tangentB, u_angularStep)).r;
+  float hT = stateAtDirection(sphereOffset(worldNormal, tangentB, u_angularStep)).r;
 
-  vec4 state = sphereState(bubbleUv);
-  float hL = sphereState(bubbleUv - vec2(u_stateTexel.x, 0.0)).r;
-  float hR = sphereState(bubbleUv + vec2(u_stateTexel.x, 0.0)).r;
-  float hB = sphereState(bubbleUv - vec2(0.0, u_stateTexel.y)).r;
-  float hT = sphereState(bubbleUv + vec2(0.0, u_stateTexel.y)).r;
-  float longitude = (bubbleUv.x - 0.5) * TWO_PI;
-  vec3 tangentLongitude = vec3(cos(longitude), 0.0, -sin(longitude));
-  vec3 tangentLatitude = normalize(cross(worldNormal, tangentLongitude));
-  float latitudeMetric = max(0.065, cos((bubbleUv.y - 0.5) * PI));
-
-  // Film thickness is nanometres over a centimetre-scale bubble. Converting
-  // the solved gradient to metres removes the previous artistic amplification:
-  // its true geometric effect on a highlight is intentionally very small.
-  float longitudeArc = max(
-    2.0 * BUBBLE_RADIUS_METERS * TWO_PI * u_stateTexel.x * latitudeMetric,
-    0.00001
-  );
-  float latitudeArc = 2.0 * BUBBLE_RADIUS_METERS * PI * u_stateTexel.y;
-  vec2 physicalSlope = vec2(
-    (hR - hL) * u_variation * 3.1e-9 / longitudeArc,
-    (hT - hB) * u_variation * 3.1e-9 / latitudeArc
-  );
+  float physicalDiameter = 2.0 * BUBBLE_RADIUS_METERS * u_angularStep;
+  vec2 physicalSlope = vec2(hR - hL, hT - hB)
+    * u_variation * 3.1e-9 / physicalDiameter;
   vec3 opticalNormal = normalize(worldNormal
-    - tangentLongitude * physicalSlope.x
-    - tangentLatitude * physicalSlope.y);
+    - tangentA * physicalSlope.x
+    - tangentB * physicalSlope.y);
 
   float cosView = max(dot(opticalNormal, viewDir), 0.001);
-  float bottomMeniscus = pow(max(0.0, 1.0 - bubbleUv.y), 5.0) * 0.12;
+  float latitude = asin(clamp(worldNormal.y, -1.0, 1.0)) / PI + 0.5;
+  float bottomMeniscus = pow(max(0.0, 1.0 - latitude), 5.0) * 0.12;
   float relativeHeight = state.r - 0.54 + bottomMeniscus;
   float thickness = max(7.0, u_thickness + relativeHeight * u_variation * 3.1);
   vec3 spectral = spectrum(thickness, cosView);
   float luminance = dot(spectral, vec3(0.2126, 0.7152, 0.0722));
   spectral = mix(vec3(luminance), spectral, u_saturation);
 
-  // Two world-space area-light approximations. They rotate correctly under a
-  // camera orbit and are evaluated against the physically scaled film normal.
   vec3 keyDir = normalize(vec3(-0.46, 0.58, 0.72));
   vec3 fillDir = normalize(vec3(0.58, -0.18, 0.79));
   vec3 keyHalf = normalize(keyDir + viewDir);

@@ -92,7 +92,7 @@ export function ControlPanel({
       </button>
       <details className="formula-card">
         <summary>What is being calculated? <span>+</span></summary>
-        <p>The GPU evolves <em>h, u, v, Γ</em>: thickness, two intrinsic tangent-velocity components, and insoluble surfactant concentration. Spherical metric terms couple semi-Lagrangian transport to capillary pressure, Marangoni stress, surface viscosity, diffusion, and gravity. Black film appears only when the solved thickness leaves the visible interference range.</p>
+        <p>The GPU evolves <em>h, u, v, Γ</em>: thickness, two intrinsic tangent-velocity components, and insoluble surfactant concentration. A six-face cubed-sphere atlas removes latitude–longitude poles; geodesic stencils and parallel transport couple the faces into one manifold. Capillary pressure, Marangoni stress, surface viscosity, diffusion, and gravity act on that shared surface. Black film appears only when solved thickness leaves the visible interference range.</p>
       </details>
     </aside>
   );

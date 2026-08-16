@@ -48,13 +48,32 @@ export function uniformLocations<const T extends readonly string[]>(
   };
 }
 
-export function createInitialState(size: number) {
-  const state = new Float32Array(size * size * 4);
-  for (let y = 0; y < size; y += 1) {
-    for (let x = 0; x < size; x += 1) {
-      const index = (y * size + x) * 4;
-      const u = (x + 0.5) / size;
-      const v = (y + 0.5) / size;
+function cubeDirection(face: number, s: number, t: number) {
+  const vector = face === 0 ? [1, t, -s]
+    : face === 1 ? [-1, t, s]
+    : face === 2 ? [s, 1, -t]
+    : face === 3 ? [s, -1, t]
+    : face === 4 ? [s, t, 1]
+    : [-s, t, -1];
+  const length = Math.hypot(vector[0], vector[1], vector[2]);
+  return vector.map((component) => component / length) as [number, number, number];
+}
+
+export function createInitialState(faceSize: number) {
+  const width = faceSize * 3;
+  const height = faceSize * 2;
+  const state = new Float32Array(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = (y * width + x) * 4;
+      const faceColumn = Math.floor(x / faceSize);
+      const faceRow = Math.floor(y / faceSize);
+      const face = faceColumn + faceRow * 3;
+      const s = (((x % faceSize) + 0.5) / faceSize) * 2 - 1;
+      const t = (((y % faceSize) + 0.5) / faceSize) * 2 - 1;
+      const direction = cubeDirection(face, s, t);
+      const u = Math.atan2(direction[0], direction[2]) / (Math.PI * 2) + 0.5;
+      const v = Math.asin(direction[1]) / Math.PI + 0.5;
       state[index] = 0.54 + (0.5 - v) * 0.11
         + Math.sin(u * Math.PI * 4 + 0.7) * Math.sin(v * Math.PI) * 0.032
         + Math.sin((u * 7 - v * 3) * Math.PI) * 0.014;
@@ -65,5 +84,5 @@ export function createInitialState(size: number) {
         + Math.cos(u * Math.PI * 2 - v * Math.PI * 5) * 0.016;
     }
   }
-  return state;
+  return { state, width, height };
 }
