@@ -48,15 +48,45 @@ export function uniformLocations<const T extends readonly string[]>(
   };
 }
 
-function cubeDirection(face: number, s: number, t: number) {
-  const vector = face === 0 ? [1, t, -s]
-    : face === 1 ? [-1, t, s]
-    : face === 2 ? [s, 1, -t]
-    : face === 3 ? [s, -1, t]
-    : face === 4 ? [s, t, 1]
-    : [-s, t, -1];
+const CHART_EXTENT = 1.22;
+const VELOCITY_RANGE = 0.28;
+
+function normalize(vector: readonly number[]) {
   const length = Math.hypot(vector[0], vector[1], vector[2]);
   return vector.map((component) => component / length) as [number, number, number];
+}
+
+function cubeDirection(face: number, s: number, t: number) {
+  const chartS = s * CHART_EXTENT;
+  const chartT = t * CHART_EXTENT;
+  const vector = face === 0 ? [1, chartT, -chartS]
+    : face === 1 ? [-1, chartT, chartS]
+    : face === 2 ? [chartS, 1, -chartT]
+    : face === 3 ? [chartS, -1, chartT]
+    : face === 4 ? [chartS, chartT, 1]
+    : [-chartS, chartT, -1];
+  return normalize(vector);
+}
+
+function faceBasis(direction: readonly number[], face: number) {
+  const derivative = face === 0 ? [0, 0, -1]
+    : face === 1 ? [0, 0, 1]
+    : face === 5 ? [-1, 0, 0]
+    : [1, 0, 0];
+  const projection = derivative[0] * direction[0]
+    + derivative[1] * direction[1]
+    + derivative[2] * direction[2];
+  const tangentA = normalize([
+    derivative[0] - direction[0] * projection,
+    derivative[1] - direction[1] * projection,
+    derivative[2] - direction[2] * projection,
+  ]);
+  const tangentB: [number, number, number] = [
+    direction[1] * tangentA[2] - direction[2] * tangentA[1],
+    direction[2] * tangentA[0] - direction[0] * tangentA[2],
+    direction[0] * tangentA[1] - direction[1] * tangentA[0],
+  ];
+  return { tangentA, tangentB };
 }
 
 export function createInitialState(faceSize: number) {
@@ -72,16 +102,30 @@ export function createInitialState(faceSize: number) {
       const s = (((x % faceSize) + 0.5) / faceSize) * 2 - 1;
       const t = (((y % faceSize) + 0.5) / faceSize) * 2 - 1;
       const direction = cubeDirection(face, s, t);
-      const u = Math.atan2(direction[0], direction[2]) / (Math.PI * 2) + 0.5;
-      const v = Math.asin(direction[1]) / Math.PI + 0.5;
-      state[index] = 0.54 + (0.5 - v) * 0.11
-        + Math.sin(u * Math.PI * 4 + 0.7) * Math.sin(v * Math.PI) * 0.032
-        + Math.sin((u * 7 - v * 3) * Math.PI) * 0.014;
-      state[index + 1] = 0.5;
-      state[index + 2] = 0.5;
+      const [dx, dy, dz] = direction;
+      const patchA = Math.exp(-8.5 * (1 - (dx * 0.58 + dy * 0.31 + dz * 0.75)));
+      const patchB = Math.exp(-10 * (1 - (-dx * 0.73 + dy * 0.54 + dz * 0.42)));
+      state[index] = 0.555 - dy * 0.056
+        + dx * dz * 0.038
+        + (dx * dx - dz * dz) * 0.022
+        + dy * (3 * dz * dz - 1) * 0.018
+        + patchA * 0.026 - patchB * 0.021;
+
+      const gravityVelocity = [dx * dy, -1 + dy * dy, dz * dy] as const;
+      const { tangentA, tangentB } = faceBasis(direction, face);
+      const velocity = gravityVelocity.map((component) => component * 0.018);
+      const componentA = velocity[0] * tangentA[0]
+        + velocity[1] * tangentA[1]
+        + velocity[2] * tangentA[2];
+      const componentB = velocity[0] * tangentB[0]
+        + velocity[1] * tangentB[1]
+        + velocity[2] * tangentB[2];
+      state[index + 1] = componentA / VELOCITY_RANGE * 0.5 + 0.5;
+      state[index + 2] = componentB / VELOCITY_RANGE * 0.5 + 0.5;
       state[index + 3] = 0.5
-        + Math.sin(u * Math.PI * 6 + v * Math.PI * 2) * 0.028
-        + Math.cos(u * Math.PI * 2 - v * Math.PI * 5) * 0.016;
+        + dx * dz * 0.052
+        + dy * (dx * dx - dz * dz) * 0.038
+        - patchA * 0.024 + patchB * 0.018;
     }
   }
   return { state, width, height };

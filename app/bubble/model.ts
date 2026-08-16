@@ -21,14 +21,14 @@ export type CameraOrbit = {
 export type Vector3 = readonly [number, number, number];
 
 export const DEFAULT_PARAMETERS: SimulationParameters = {
-  thickness: 520,
-  variation: 360,
+  thickness: 470,
+  variation: 430,
   refractiveIndex: 1.33,
-  gravity: 0.42,
-  surfaceTension: 0.62,
-  viscosity: 0.34,
-  marangoni: 0.78,
-  surfactantDiffusion: 0.18,
+  gravity: 0.66,
+  surfaceTension: 0.72,
+  viscosity: 0.26,
+  marangoni: 0.94,
+  surfactantDiffusion: 0.14,
   saturation: 1.08,
   speed: 1,
 };

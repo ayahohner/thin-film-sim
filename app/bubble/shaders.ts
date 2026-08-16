@@ -1,4 +1,6 @@
 const cubeSphereMapping = `
+const float CHART_EXTENT = 1.22;
+
 vec3 cubeVector(int face, vec2 st) {
   if (face == 0) return vec3(1.0, st.y, -st.x);
   if (face == 1) return vec3(-1.0, st.y, st.x);
@@ -26,34 +28,56 @@ vec3 atlasDirection(vec2 atlasUv, out int face) {
   ivec2 tile = ivec2(floor(tiled));
   face = tile.x + tile.y * 3;
   vec2 localUv = fract(tiled);
-  return normalize(cubeVector(face, localUv * 2.0 - 1.0));
+  return normalize(cubeVector(face, (localUv * 2.0 - 1.0) * CHART_EXTENT));
 }
 
-vec2 directionAtlasUv(vec3 direction, out int face) {
-  face = directionFace(direction);
-  vec3 magnitude = abs(direction);
+vec2 directionChartUv(vec3 direction, int face, out float weight) {
+  direction = normalize(direction);
+  float denominator = face == 0 ? direction.x
+    : face == 1 ? -direction.x
+    : face == 2 ? direction.y
+    : face == 3 ? -direction.y
+    : face == 4 ? direction.z
+    : -direction.z;
+  float safeDenominator = max(denominator, 0.000001);
   vec2 st;
-  if (face == 0) st = vec2(-direction.z, direction.y) / magnitude.x;
-  else if (face == 1) st = vec2(direction.z, direction.y) / magnitude.x;
-  else if (face == 2) st = vec2(direction.x, -direction.z) / magnitude.y;
-  else if (face == 3) st = vec2(direction.x, direction.z) / magnitude.y;
-  else if (face == 4) st = vec2(direction.x, direction.y) / magnitude.z;
-  else st = vec2(-direction.x, direction.y) / magnitude.z;
+  if (face == 0) st = vec2(-direction.z, direction.y) / safeDenominator;
+  else if (face == 1) st = vec2(direction.z, direction.y) / safeDenominator;
+  else if (face == 2) st = vec2(direction.x, -direction.z) / safeDenominator;
+  else if (face == 3) st = vec2(direction.x, direction.z) / safeDenominator;
+  else if (face == 4) st = vec2(direction.x, direction.y) / safeDenominator;
+  else st = vec2(-direction.x, direction.y) / safeDenominator;
+  float chartRadius = max(abs(st.x), abs(st.y));
+  float support = 1.0 - smoothstep(CHART_EXTENT * 0.76, CHART_EXTENT, chartRadius);
+  weight = denominator > 0.0 ? support * denominator * denominator : 0.0;
   vec2 localUv = clamp(
-    st * 0.5 + 0.5,
+    st / (2.0 * CHART_EXTENT) + 0.5,
     vec2(0.5 * u_faceTexel),
     vec2(1.0 - 0.5 * u_faceTexel)
   );
   return (faceTile(face) + localUv) / vec2(3.0, 2.0);
 }
 
-vec4 stateAtDirection(vec3 direction, out int face) {
-  return texture(u_state, directionAtlasUv(normalize(direction), face));
+vec4 chartState(vec3 direction, int face, out float weight) {
+  vec2 uv = directionChartUv(direction, face, weight);
+  return weight > 0.000001 ? texture(u_state, uv) : vec4(0.0);
 }
 
 vec4 stateAtDirection(vec3 direction) {
-  int face;
-  return stateAtDirection(direction, face);
+  direction = normalize(direction);
+  int faceX = direction.x >= 0.0 ? 0 : 1;
+  int faceY = direction.y >= 0.0 ? 2 : 3;
+  int faceZ = direction.z >= 0.0 ? 4 : 5;
+  float weightX;
+  float weightY;
+  float weightZ;
+  vec4 stateX = chartState(direction, faceX, weightX);
+  vec4 stateY = chartState(direction, faceY, weightY);
+  vec4 stateZ = chartState(direction, faceZ, weightZ);
+  float totalWeight = max(weightX + weightY + weightZ, 0.000001);
+  vec4 state = (stateX * weightX + stateY * weightY + stateZ * weightZ)
+    / totalWeight;
+  return vec4(state.r, 0.5, 0.5, state.a);
 }
 
 void faceBasis(vec3 normal, int face, out vec3 tangentA, out vec3 tangentB) {
@@ -106,13 +130,28 @@ vec2 decodeVelocityComponents(vec4 state) {
 }
 
 vec3 velocityAtDirection(vec3 direction) {
-  int face;
-  vec4 state = stateAtDirection(direction, face);
-  vec3 tangentA;
-  vec3 tangentB;
-  faceBasis(direction, face, tangentA, tangentB);
-  vec2 components = decodeVelocityComponents(state);
-  return tangentA * components.x + tangentB * components.y;
+  direction = normalize(direction);
+  int faces[3] = int[3](
+    direction.x >= 0.0 ? 0 : 1,
+    direction.y >= 0.0 ? 2 : 3,
+    direction.z >= 0.0 ? 4 : 5
+  );
+  vec3 velocity = vec3(0.0);
+  float totalWeight = 0.0;
+  for (int index = 0; index < 3; index += 1) {
+    float weight;
+    vec4 state = chartState(direction, faces[index], weight);
+    if (weight > 0.000001) {
+      vec3 tangentA;
+      vec3 tangentB;
+      faceBasis(direction, faces[index], tangentA, tangentB);
+      vec2 components = decodeVelocityComponents(state);
+      velocity += (tangentA * components.x + tangentB * components.y) * weight;
+      totalWeight += weight;
+    }
+  }
+  velocity /= max(totalWeight, 0.000001);
+  return velocity - direction * dot(velocity, direction);
 }
 
 vec3 parallelTransport(vec3 vector, vec3 from, vec3 to) {
@@ -205,10 +244,13 @@ void main() {
     / (u_angularStep * u_angularStep);
 
   float height = center.r;
-  vec3 force = -u_marangoni * 0.055 * gradSurfactant / max(height, 0.05);
-  force += u_surfaceTension * 0.00085 * height * height * gradLapHeight;
-  force += u_viscosity * 0.00042 * lapVelocity;
-  force += u_gravity * 0.052 * (vec3(0.0, -1.0, 0.0) + normal * normal.y);
+  float mobility = height * height
+    / max(height * height + 0.08 + 0.22 * u_viscosity, 0.001);
+  vec3 force = -u_marangoni * 0.105 * gradSurfactant / max(height, 0.05);
+  force += u_surfaceTension * 0.0022 * height * height * gradLapHeight;
+  force += u_viscosity * 0.00048 * lapVelocity;
+  force += u_gravity * 0.118 * (vec3(0.0, -1.0, 0.0) + normal * normal.y);
+  force *= mix(0.52, 1.32, mobility);
 
   float pointerInfluence = exp(-(1.0 - dot(normal, u_pointerDirection)) * 42.0)
     * u_pointerDown;
@@ -220,17 +262,11 @@ void main() {
   vec3 midpoint = backtrace(normal, halfVelocity, 0.5 * u_dt);
   vec3 midpointVelocity = parallelTransport(velocityAtDirection(midpoint), midpoint, normal);
   vec3 sourceDirection = backtrace(normal, midpointVelocity, u_dt);
-  int sourceFace;
-  vec4 advected = stateAtDirection(sourceDirection, sourceFace);
-  vec3 sourceTangentA;
-  vec3 sourceTangentB;
-  faceBasis(sourceDirection, sourceFace, sourceTangentA, sourceTangentB);
-  vec2 sourceComponents = decodeVelocityComponents(advected);
-  vec3 sourceVelocity = sourceTangentA * sourceComponents.x
-    + sourceTangentB * sourceComponents.y;
+  vec4 advected = stateAtDirection(sourceDirection);
+  vec3 sourceVelocity = velocityAtDirection(sourceDirection);
   vec3 newVelocity = parallelTransport(sourceVelocity, sourceDirection, normal) + u_dt * force;
   float viscousDrag = exp(-u_viscosity * u_dt
-    * (0.14 + 0.016 / max(height * height, 0.01)));
+    * (0.18 + 0.022 / max(height * height, 0.01)));
   newVelocity = clampMagnitude(newVelocity * viscousDrag, VMAX);
 
   float areaScale = exp(clamp(-u_dt * divergence, -0.12, 0.12));
@@ -240,7 +276,7 @@ void main() {
     normal, tangentA, tangentB, directionL, directionR, directionB, directionT
   );
 
-  newHeight = clamp(newHeight, 0.018, 0.98);
+  newHeight = clamp(newHeight, 0.012, 0.98);
   newSurfactant = clamp(newSurfactant, 0.08, 0.92);
   outColor = vec4(
     newHeight,
@@ -318,6 +354,22 @@ vec3 spectrum(float thickness, float cosIncident) {
   return color * 0.42;
 }
 
+vec3 geodesicHeightGradient(vec3 normal) {
+  vec3 reference = abs(normal.y) < 0.88 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+  vec3 tangentA = normalize(cross(reference, normal));
+  vec3 tangentB = normalize(cross(normal, tangentA));
+  float sampleRadius = u_angularStep * 2.35;
+  float center = stateAtDirection(normal).r;
+  vec3 gradient = vec3(0.0);
+  for (int index = 0; index < 6; index += 1) {
+    float angle = TWO_PI * (float(index) + 0.5) / 6.0;
+    vec3 tangent = tangentA * cos(angle) + tangentB * sin(angle);
+    float sampleHeight = stateAtDirection(sphereOffset(normal, tangent, sampleRadius)).r;
+    gradient += tangent * (sampleHeight - center);
+  }
+  return gradient / (3.0 * sampleRadius);
+}
+
 void main() {
   vec2 uv = v_uv;
   float aspect = u_resolution.x / u_resolution.y;
@@ -344,21 +396,10 @@ void main() {
     u_cameraOrbit.x
   );
   vec4 state = stateAtDirection(worldNormal);
-  int currentFace = directionFace(worldNormal);
-  vec3 tangentA;
-  vec3 tangentB;
-  faceBasis(worldNormal, currentFace, tangentA, tangentB);
-  float hL = stateAtDirection(sphereOffset(worldNormal, -tangentA, u_angularStep)).r;
-  float hR = stateAtDirection(sphereOffset(worldNormal, tangentA, u_angularStep)).r;
-  float hB = stateAtDirection(sphereOffset(worldNormal, -tangentB, u_angularStep)).r;
-  float hT = stateAtDirection(sphereOffset(worldNormal, tangentB, u_angularStep)).r;
-
-  float physicalDiameter = 2.0 * BUBBLE_RADIUS_METERS * u_angularStep;
-  vec2 physicalSlope = vec2(hR - hL, hT - hB)
-    * u_variation * 3.1e-9 / physicalDiameter;
-  vec3 opticalNormal = normalize(worldNormal
-    - tangentA * physicalSlope.x
-    - tangentB * physicalSlope.y);
+  vec3 heightGradient = geodesicHeightGradient(worldNormal);
+  vec3 physicalSlope = heightGradient
+    * u_variation * 3.1e-9 / BUBBLE_RADIUS_METERS;
+  vec3 opticalNormal = normalize(worldNormal - physicalSlope);
 
   float cosView = max(dot(opticalNormal, viewDir), 0.001);
   float latitude = asin(clamp(worldNormal.y, -1.0, 1.0)) / PI + 0.5;

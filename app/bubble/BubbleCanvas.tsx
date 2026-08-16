@@ -97,8 +97,8 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
         }
 
         const mobile = window.innerWidth < 700;
-        const faceSize = mobile ? 52 : 72;
-        const angularStep = 1.75 / faceSize;
+        const faceSize = mobile ? 56 : 80;
+        const angularStep = 2.35 / faceSize;
         const usesFloatState = Boolean(gl.getExtension("EXT_color_buffer_float"));
         const initial = createInitialState(faceSize);
         const initialByteState = new Uint8Array(initial.state.length);
@@ -134,6 +134,7 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
         });
 
         let readIndex = 0;
+        let timeDebt = 0;
         resetSimulationRef.current = () => {
           for (const texture of textures) {
             gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -143,6 +144,7 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
             );
           }
           readIndex = 0;
+          timeDebt = 0;
         };
 
         const resize = () => {
@@ -157,22 +159,24 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
 
         let lastFrame = performance.now();
         let simulationTime = 0;
-        const maxSubsteps = mobile ? 8 : 12;
-        const targetStep = 1 / 90;
+        const modelSecondsPerRealSecond = 2.25;
+        const maxSubsteps = mobile ? 10 : 14;
+        const targetStep = 1 / 75;
+        const maxStableStep = 1 / 30;
 
         const render = (now: number) => {
           resize();
           const current = parametersRef.current;
-          const frameElapsed = Math.min(0.025, Math.max(0, (now - lastFrame) / 1000));
+          const frameElapsed = Math.min(0.05, Math.max(0, (now - lastFrame) / 1000));
           lastFrame = now;
 
           if (!pausedRef.current) {
-            const acceleratedElapsed = frameElapsed * current.speed;
-            const substeps = Math.min(
-              maxSubsteps,
-              Math.max(1, Math.ceil(acceleratedElapsed / targetStep)),
-            );
-            const stepDuration = acceleratedElapsed / substeps;
+            timeDebt += frameElapsed * current.speed * modelSecondsPerRealSecond;
+            const requestedSubsteps = Math.floor(timeDebt / targetStep);
+            const substeps = Math.min(maxSubsteps, requestedSubsteps);
+            const stepDuration = requestedSubsteps > maxSubsteps
+              ? Math.min(maxStableStep, timeDebt / maxSubsteps)
+              : targetStep;
             gl.useProgram(simulationProgram);
             gl.bindVertexArray(vertexArray);
             gl.viewport(0, 0, initial.width, initial.height);
@@ -207,6 +211,8 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
               gl.drawArrays(gl.TRIANGLES, 0, 6);
               readIndex = 1 - readIndex;
             }
+            timeDebt = Math.max(0, timeDebt - stepDuration * substeps);
+            timeDebt = Math.min(timeDebt, maxStableStep * maxSubsteps);
             const velocity = filmPointerRef.current.velocity;
             filmPointerRef.current.velocity = [
               velocity[0] * 0.72,

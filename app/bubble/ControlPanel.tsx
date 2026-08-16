@@ -92,7 +92,7 @@ export function ControlPanel({
       </button>
       <details className="formula-card">
         <summary>What is being calculated? <span>+</span></summary>
-        <p>The GPU evolves <em>h, u, v, Γ</em>: thickness, two intrinsic tangent-velocity components, and insoluble surfactant concentration. A six-face cubed-sphere atlas removes latitude–longitude poles; geodesic stencils and parallel transport couple the faces into one manifold. Capillary pressure, Marangoni stress, surface viscosity, diffusion, and gravity act on that shared surface. Black film appears only when solved thickness leaves the visible interference range.</p>
+        <p>The GPU evolves <em>h, u, v, Γ</em>: thickness, tangent velocity, and insoluble surfactant concentration. Six overlapping spherical charts are remapped through a partition of unity, while geodesic stencils and parallel transport keep fluxes continuous across their overlaps. Nonlinear film mobility couples capillary pressure, Marangoni stress, viscosity, diffusion, and gravity. The 1× clock is calibrated to the visible drainage and convection timescale of a centimetre-scale soap bubble.</p>
       </details>
     </aside>
   );
