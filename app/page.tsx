@@ -229,7 +229,7 @@ export default function Home() {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const gl = canvas.getContext("webgl2", { antialias: true, alpha: false });
-    if (!gl) { setAvailable(false); return; }
+    if (!gl) { queueMicrotask(() => setAvailable(false)); return; }
 
     try {
       const simProgram = program(gl, simulationShader);
@@ -330,7 +330,7 @@ export default function Home() {
       return () => cancelAnimationFrame(animation);
     } catch (error) {
       console.error(error);
-      setAvailable(false);
+      queueMicrotask(() => setAvailable(false));
     }
   }, []);
 
