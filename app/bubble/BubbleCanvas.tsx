@@ -9,17 +9,23 @@ import {
 } from "react";
 import type { CameraOrbit, SimulationParameters, Vector3 } from "./model";
 import { screenNormalToWorldDirection } from "./model";
-import { displayShader, simulationShader, vertexShader } from "./shaders";
+import { createIcosphere } from "./icosphere";
 import {
-  createInitialState,
+  backgroundShader,
+  bubbleFragmentShader,
+  bubbleVertexShader,
+  fullscreenVertexShader,
+  simulationShader,
+} from "./shaders";
+import {
   createProgram,
+  createTexture,
   FULLSCREEN_TRIANGLES,
+  stateUploadData,
   uniformLocations,
 } from "./webgl";
 
-export type BubbleCanvasHandle = {
-  reset: () => void;
-};
+export type BubbleCanvasHandle = { reset: () => void };
 
 type BubbleCanvasProps = {
   parameters: SimulationParameters;
@@ -41,14 +47,15 @@ type Interaction = {
 };
 
 const SIMULATION_UNIFORMS = [
-  "u_state", "u_faceTexel", "u_angularStep", "u_dt", "u_gravity",
-  "u_surfaceTension", "u_viscosity", "u_marangoni", "u_diffusion",
+  "u_state0", "u_state1", "u_positions", "u_neighbors", "u_stateSize",
+  "u_vertexCount", "u_dt", "u_gravity", "u_surfaceTension", "u_viscosity",
+  "u_marangoni", "u_diffusion", "u_evaporation", "u_thermalGradient",
   "u_pointerDirection", "u_pointerVelocity", "u_pointerDown",
 ] as const;
 
-const DISPLAY_UNIFORMS = [
-  "u_state", "u_faceTexel", "u_angularStep", "u_resolution", "u_time",
-  "u_cameraOrbit", "u_thickness", "u_variation", "u_ior", "u_saturation",
+const BUBBLE_UNIFORMS = [
+  "u_state0", "u_resolution", "u_cameraOrbit", "u_thickness", "u_variation",
+  "u_ior", "u_saturation",
 ] as const;
 
 export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
@@ -80,54 +87,83 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
 
       let animation = 0;
       try {
-        const simulationProgram = createProgram(gl, vertexShader, simulationShader);
-        const displayProgram = createProgram(gl, vertexShader, displayShader);
+        const simulationProgram = createProgram(gl, fullscreenVertexShader, simulationShader);
+        const backgroundProgram = createProgram(gl, fullscreenVertexShader, backgroundShader);
+        const bubbleProgram = createProgram(gl, bubbleVertexShader, bubbleFragmentShader);
         const simulationUniforms = uniformLocations(gl, simulationProgram, SIMULATION_UNIFORMS);
-        const displayUniforms = uniformLocations(gl, displayProgram, DISPLAY_UNIFORMS);
-        const vertexArray = gl.createVertexArray();
-        const vertexBuffer = gl.createBuffer();
-        if (!vertexArray || !vertexBuffer) throw new Error("Unable to allocate WebGL geometry");
-        gl.bindVertexArray(vertexArray);
-        gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+        const bubbleUniforms = uniformLocations(gl, bubbleProgram, BUBBLE_UNIFORMS);
+
+        const fullscreenArray = gl.createVertexArray();
+        const fullscreenBuffer = gl.createBuffer();
+        if (!fullscreenArray || !fullscreenBuffer) {
+          throw new Error("Unable to allocate fullscreen geometry");
+        }
+        gl.bindVertexArray(fullscreenArray);
+        gl.bindBuffer(gl.ARRAY_BUFFER, fullscreenBuffer);
         gl.bufferData(gl.ARRAY_BUFFER, FULLSCREEN_TRIANGLES, gl.STATIC_DRAW);
-        for (const shaderProgram of [simulationProgram, displayProgram]) {
-          const location = gl.getAttribLocation(shaderProgram, "a_position");
+        for (const program of [simulationProgram, backgroundProgram]) {
+          const location = gl.getAttribLocation(program, "a_position");
           gl.enableVertexAttribArray(location);
           gl.vertexAttribPointer(location, 2, gl.FLOAT, false, 0, 0);
         }
 
         const mobile = window.innerWidth < 700;
-        const faceSize = mobile ? 56 : 80;
-        const angularStep = 2.35 / faceSize;
-        const usesFloatState = Boolean(gl.getExtension("EXT_color_buffer_float"));
-        const initial = createInitialState(faceSize);
-        const initialByteState = new Uint8Array(initial.state.length);
-        for (let index = 0; index < initial.state.length; index += 1) {
-          initialByteState[index] = Math.round(Math.max(0, Math.min(1, initial.state[index])) * 255);
+        const mesh = createIcosphere(mobile ? 4 : 5);
+        const bubbleArray = gl.createVertexArray();
+        const positionBuffer = gl.createBuffer();
+        const stateUvBuffer = gl.createBuffer();
+        const indexBuffer = gl.createBuffer();
+        if (!bubbleArray || !positionBuffer || !stateUvBuffer || !indexBuffer) {
+          throw new Error("Unable to allocate manifold geometry");
         }
-        const initialState = usesFloatState ? initial.state : initialByteState;
-        const internalFormat = usesFloatState ? gl.RGBA16F : gl.RGBA8;
-        const stateType = usesFloatState ? gl.FLOAT : gl.UNSIGNED_BYTE;
-        const textures = [gl.createTexture(), gl.createTexture()];
-        const framebuffers = [gl.createFramebuffer(), gl.createFramebuffer()];
-        if (textures.some((texture) => !texture) || framebuffers.some((buffer) => !buffer)) {
-          throw new Error("Unable to allocate simulation state");
-        }
+        gl.bindVertexArray(bubbleArray);
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, mesh.positions, gl.STATIC_DRAW);
+        const positionLocation = gl.getAttribLocation(bubbleProgram, "a_position");
+        gl.enableVertexAttribArray(positionLocation);
+        gl.vertexAttribPointer(positionLocation, 3, gl.FLOAT, false, 0, 0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, stateUvBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, mesh.stateUvs, gl.STATIC_DRAW);
+        const stateUvLocation = gl.getAttribLocation(bubbleProgram, "a_stateUv");
+        gl.enableVertexAttribArray(stateUvLocation);
+        gl.vertexAttribPointer(stateUvLocation, 2, gl.FLOAT, false, 0, 0);
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.indices, gl.STATIC_DRAW);
 
-        textures.forEach((texture, index) => {
-          gl.bindTexture(gl.TEXTURE_2D, texture);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-          gl.texImage2D(
-            gl.TEXTURE_2D, 0, internalFormat, initial.width, initial.height,
-            0, gl.RGBA, stateType, initialState,
-          );
-          gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffers[index]);
+        const usesFloatState = Boolean(gl.getExtension("EXT_color_buffer_float"));
+        const stateInternalFormat = usesFloatState ? gl.RGBA16F : gl.RGBA8;
+        const stateType = usesFloatState ? gl.FLOAT : gl.UNSIGNED_BYTE;
+        const initialState0 = stateUploadData(mesh.initialState0, usesFloatState);
+        const initialState1 = stateUploadData(mesh.initialState1, usesFloatState);
+        const positionTexture = createTexture(
+          gl, mesh.textureWidth, mesh.textureHeight,
+          gl.RGBA32F, gl.FLOAT, mesh.positionTexels,
+        );
+        const neighborTexture = createTexture(
+          gl, mesh.textureWidth, mesh.textureHeight * 6,
+          gl.RGBA32F, gl.FLOAT, mesh.neighborTexels,
+        );
+        const state0Textures = [0, 1].map(() => createTexture(
+          gl, mesh.textureWidth, mesh.textureHeight,
+          stateInternalFormat, stateType, initialState0,
+        ));
+        const state1Textures = [0, 1].map(() => createTexture(
+          gl, mesh.textureWidth, mesh.textureHeight,
+          stateInternalFormat, stateType, initialState1,
+        ));
+        const framebuffers = [gl.createFramebuffer(), gl.createFramebuffer()];
+        if (framebuffers.some((framebuffer) => !framebuffer)) {
+          throw new Error("Unable to allocate simulation framebuffer");
+        }
+        framebuffers.forEach((framebuffer, index) => {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
           gl.framebufferTexture2D(
-            gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0,
+            gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, state0Textures[index], 0,
           );
+          gl.framebufferTexture2D(
+            gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, state1Textures[index], 0,
+          );
+          gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
           if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
             throw new Error("Simulation framebuffer is incomplete");
           }
@@ -135,14 +171,20 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
 
         let readIndex = 0;
         let timeDebt = 0;
+        const uploadState = (
+          texture: WebGLTexture,
+          data: Float32Array | Uint8Array,
+        ) => {
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+          gl.texSubImage2D(
+            gl.TEXTURE_2D, 0, 0, 0,
+            mesh.textureWidth, mesh.textureHeight,
+            gl.RGBA, stateType, data,
+          );
+        };
         resetSimulationRef.current = () => {
-          for (const texture of textures) {
-            gl.bindTexture(gl.TEXTURE_2D, texture);
-            gl.texSubImage2D(
-              gl.TEXTURE_2D, 0, 0, 0, initial.width, initial.height,
-              gl.RGBA, stateType, initialState,
-            );
-          }
+          for (const texture of state0Textures) uploadState(texture, initialState0);
+          for (const texture of state1Textures) uploadState(texture, initialState1);
           readIndex = 0;
           timeDebt = 0;
         };
@@ -158,11 +200,15 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
         };
 
         let lastFrame = performance.now();
-        let simulationTime = 0;
         const modelSecondsPerRealSecond = 2.25;
         const maxSubsteps = mobile ? 10 : 14;
         const targetStep = 1 / 75;
         const maxStableStep = 1 / 30;
+
+        const bindTexture = (unit: number, texture: WebGLTexture) => {
+          gl.activeTexture(gl.TEXTURE0 + unit);
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+        };
 
         const render = (now: number) => {
           resize();
@@ -178,70 +224,81 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
               ? Math.min(maxStableStep, timeDebt / maxSubsteps)
               : targetStep;
             gl.useProgram(simulationProgram);
-            gl.bindVertexArray(vertexArray);
-            gl.viewport(0, 0, initial.width, initial.height);
-            gl.activeTexture(gl.TEXTURE0);
-            gl.uniform1i(simulationUniforms.u_state, 0);
-            gl.uniform1f(simulationUniforms.u_faceTexel, 1 / faceSize);
-            gl.uniform1f(simulationUniforms.u_angularStep, angularStep);
+            gl.bindVertexArray(fullscreenArray);
+            gl.viewport(0, 0, mesh.textureWidth, mesh.textureHeight);
+            gl.uniform1i(simulationUniforms.u_state0, 0);
+            gl.uniform1i(simulationUniforms.u_state1, 1);
+            gl.uniform1i(simulationUniforms.u_positions, 2);
+            gl.uniform1i(simulationUniforms.u_neighbors, 3);
+            gl.uniform2i(
+              simulationUniforms.u_stateSize,
+              mesh.textureWidth,
+              mesh.textureHeight,
+            );
+            gl.uniform1i(simulationUniforms.u_vertexCount, mesh.vertexCount);
             gl.uniform1f(simulationUniforms.u_gravity, current.gravity);
             gl.uniform1f(simulationUniforms.u_surfaceTension, current.surfaceTension);
             gl.uniform1f(simulationUniforms.u_viscosity, current.viscosity);
             gl.uniform1f(simulationUniforms.u_marangoni, current.marangoni);
             gl.uniform1f(simulationUniforms.u_diffusion, current.surfactantDiffusion);
+            gl.uniform1f(simulationUniforms.u_evaporation, current.evaporation);
+            gl.uniform1f(simulationUniforms.u_thermalGradient, current.thermalGradient);
             gl.uniform3f(
               simulationUniforms.u_pointerDirection,
-              filmPointerRef.current.direction[0],
-              filmPointerRef.current.direction[1],
-              filmPointerRef.current.direction[2],
+              ...filmPointerRef.current.direction,
             );
             gl.uniform3f(
               simulationUniforms.u_pointerVelocity,
-              filmPointerRef.current.velocity[0],
-              filmPointerRef.current.velocity[1],
-              filmPointerRef.current.velocity[2],
+              ...filmPointerRef.current.velocity,
             );
             gl.uniform1f(simulationUniforms.u_pointerDown, filmPointerRef.current.down);
+            bindTexture(2, positionTexture);
+            bindTexture(3, neighborTexture);
 
             for (let step = 0; step < substeps; step += 1) {
-              simulationTime += stepDuration;
               gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffers[1 - readIndex]);
-              gl.bindTexture(gl.TEXTURE_2D, textures[readIndex]);
+              bindTexture(0, state0Textures[readIndex]);
+              bindTexture(1, state1Textures[readIndex]);
               gl.uniform1f(simulationUniforms.u_dt, stepDuration);
               gl.drawArrays(gl.TRIANGLES, 0, 6);
               readIndex = 1 - readIndex;
             }
             timeDebt = Math.max(0, timeDebt - stepDuration * substeps);
             timeDebt = Math.min(timeDebt, maxStableStep * maxSubsteps);
-            const velocity = filmPointerRef.current.velocity;
+            const pointerVelocity = filmPointerRef.current.velocity;
             filmPointerRef.current.velocity = [
-              velocity[0] * 0.72,
-              velocity[1] * 0.72,
-              velocity[2] * 0.72,
+              pointerVelocity[0] * 0.72,
+              pointerVelocity[1] * 0.72,
+              pointerVelocity[2] * 0.72,
             ];
           }
 
-          gl.useProgram(displayProgram);
-          gl.bindVertexArray(vertexArray);
           gl.bindFramebuffer(gl.FRAMEBUFFER, null);
           gl.viewport(0, 0, canvas.width, canvas.height);
-          gl.activeTexture(gl.TEXTURE0);
-          gl.bindTexture(gl.TEXTURE_2D, textures[readIndex]);
-          gl.uniform1i(displayUniforms.u_state, 0);
-          gl.uniform1f(displayUniforms.u_faceTexel, 1 / faceSize);
-          gl.uniform1f(displayUniforms.u_angularStep, angularStep);
-          gl.uniform2f(displayUniforms.u_resolution, canvas.width, canvas.height);
-          gl.uniform1f(displayUniforms.u_time, simulationTime);
+          gl.disable(gl.DEPTH_TEST);
+          gl.useProgram(backgroundProgram);
+          gl.bindVertexArray(fullscreenArray);
+          gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+          gl.enable(gl.DEPTH_TEST);
+          gl.depthFunc(gl.LESS);
+          gl.clearDepth(1);
+          gl.clear(gl.DEPTH_BUFFER_BIT);
+          gl.useProgram(bubbleProgram);
+          gl.bindVertexArray(bubbleArray);
+          bindTexture(0, state0Textures[readIndex]);
+          gl.uniform1i(bubbleUniforms.u_state0, 0);
+          gl.uniform2f(bubbleUniforms.u_resolution, canvas.width, canvas.height);
           gl.uniform2f(
-            displayUniforms.u_cameraOrbit,
+            bubbleUniforms.u_cameraOrbit,
             cameraOrbitRef.current.yaw,
             cameraOrbitRef.current.pitch,
           );
-          gl.uniform1f(displayUniforms.u_thickness, current.thickness);
-          gl.uniform1f(displayUniforms.u_variation, current.variation);
-          gl.uniform1f(displayUniforms.u_ior, current.refractiveIndex);
-          gl.uniform1f(displayUniforms.u_saturation, current.saturation);
-          gl.drawArrays(gl.TRIANGLES, 0, 6);
+          gl.uniform1f(bubbleUniforms.u_thickness, current.thickness);
+          gl.uniform1f(bubbleUniforms.u_variation, current.variation);
+          gl.uniform1f(bubbleUniforms.u_ior, current.refractiveIndex);
+          gl.uniform1f(bubbleUniforms.u_saturation, current.saturation);
+          gl.drawElements(gl.TRIANGLES, mesh.indices.length, gl.UNSIGNED_INT, 0);
           animation = requestAnimationFrame(render);
         };
 
@@ -250,12 +307,19 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
         return () => {
           cancelAnimationFrame(animation);
           resetSimulationRef.current = () => {};
-          for (const texture of textures) gl.deleteTexture(texture);
+          for (const texture of [
+            positionTexture, neighborTexture,
+            ...state0Textures, ...state1Textures,
+          ]) gl.deleteTexture(texture);
           for (const framebuffer of framebuffers) gl.deleteFramebuffer(framebuffer);
-          gl.deleteBuffer(vertexBuffer);
-          gl.deleteVertexArray(vertexArray);
+          for (const buffer of [
+            fullscreenBuffer, positionBuffer, stateUvBuffer, indexBuffer,
+          ]) gl.deleteBuffer(buffer);
+          gl.deleteVertexArray(fullscreenArray);
+          gl.deleteVertexArray(bubbleArray);
           gl.deleteProgram(simulationProgram);
-          gl.deleteProgram(displayProgram);
+          gl.deleteProgram(backgroundProgram);
+          gl.deleteProgram(bubbleProgram);
         };
       } catch (error) {
         console.error(error);
@@ -277,13 +341,11 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
         return;
       }
 
-      const normalX = qx / radius;
-      const normalY = qy / radius;
-      const normalZ = Math.sqrt(Math.max(0, 1 - radial));
-      const direction = screenNormalToWorldDirection(
-        [normalX, normalY, normalZ],
-        cameraOrbitRef.current,
-      );
+      const direction = screenNormalToWorldDirection([
+        qx / radius,
+        qy / radius,
+        Math.sqrt(Math.max(0, 1 - radial)),
+      ], cameraOrbitRef.current);
       const previous = filmPointerRef.current;
       const eventTime = event.timeStamp / 1000;
       const deltaTime = Math.max(0.008, eventTime - previous.lastTime);
@@ -306,8 +368,8 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
         tangentDelta[1] / deltaTime,
         tangentDelta[2] / deltaTime,
       ] : [0, 0, 0];
-      const speed = Math.hypot(rawVelocity[0], rawVelocity[1], rawVelocity[2]);
-      const velocityScale = speed > 0.28 ? 0.28 / speed : 1;
+      const speed = Math.hypot(...rawVelocity);
+      const velocityScale = speed > 0.34 ? 0.34 / speed : 1;
       filmPointerRef.current = {
         direction,
         velocity: [
@@ -328,8 +390,8 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
         lastClientY: event.clientY,
       };
       if (event.shiftKey) {
-        filmPointerRef.current.down = 0;
         event.currentTarget.dataset.orbiting = "true";
+        filmPointerRef.current.down = 0;
       } else {
         updateFilmPointer(event, 1);
       }
@@ -340,18 +402,18 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
       if (interaction.mode === "orbit") {
         const deltaX = event.clientX - interaction.lastClientX;
         const deltaY = event.clientY - interaction.lastClientY;
-        cameraOrbitRef.current.yaw = (
-          cameraOrbitRef.current.yaw + deltaX * 0.006
-        ) % (Math.PI * 2);
-        cameraOrbitRef.current.pitch = Math.max(
-          -1.25,
-          Math.min(1.25, cameraOrbitRef.current.pitch + deltaY * 0.006),
-        );
+        cameraOrbitRef.current = {
+          yaw: cameraOrbitRef.current.yaw + deltaX * 0.008,
+          pitch: Math.max(
+            -1.35,
+            Math.min(1.35, cameraOrbitRef.current.pitch + deltaY * 0.008),
+          ),
+        };
         interaction.lastClientX = event.clientX;
         interaction.lastClientY = event.clientY;
-        return;
+      } else if (interaction.mode === "film") {
+        updateFilmPointer(event);
       }
-      if (interaction.mode === "film") updateFilmPointer(event);
     };
 
     const pointerEnd = (event: ReactPointerEvent<HTMLCanvasElement>) => {
@@ -368,7 +430,7 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
       <canvas
         ref={canvasRef}
         className="bubble-canvas"
-        aria-label="Animated soap bubble thin-film interference simulation; Shift-drag rotates the scene"
+        aria-label="Animated soap bubble thin-film simulation; Shift-drag rotates the scene"
         onPointerDown={pointerDown}
         onPointerMove={pointerMove}
         onPointerUp={pointerEnd}

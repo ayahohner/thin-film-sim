@@ -13,7 +13,7 @@ type RangeProps = {
 };
 
 function Range({ label, value, min, max, step, unit = "", onChange }: RangeProps) {
-  const decimals = step < 0.1 ? 2 : step < 1 ? 1 : 0;
+  const decimals = step < 0.01 ? 3 : step < 0.1 ? 2 : step < 1 ? 1 : 0;
   return (
     <label className="control-row">
       <span className="control-heading">
@@ -73,18 +73,20 @@ export function ControlPanel({
       </div>
       <div className="control-group">
         <h3>Optics</h3>
-        <Range label="Mean thickness" value={parameters.thickness} min={20} max={1200} step={1} unit=" nm" onChange={range("thickness")} />
-        <Range label="Thickness variation" value={parameters.variation} min={0} max={600} step={1} unit=" nm" onChange={range("variation")} />
-        <Range label="Refractive index" value={parameters.refractiveIndex} min={1.05} max={1.8} step={0.01} onChange={range("refractiveIndex")} />
+        <Range label="Mean thickness" value={parameters.thickness} min={20} max={2500} step={1} unit=" nm" onChange={range("thickness")} />
+        <Range label="Thickness variation" value={parameters.variation} min={0} max={1500} step={1} unit=" nm" onChange={range("variation")} />
+        <Range label="Refractive index" value={parameters.refractiveIndex} min={1.28} max={1.45} step={0.001} onChange={range("refractiveIndex")} />
         <Range label="Color response" value={parameters.saturation} min={0} max={1.6} step={0.01} onChange={range("saturation")} />
       </div>
       <div className="control-group">
         <h3>Fluid model</h3>
-        <Range label="Tangential gravity" value={parameters.gravity} min={0} max={1.5} step={0.01} onChange={range("gravity")} />
-        <Range label="Surface tension" value={parameters.surfaceTension} min={0} max={1.5} step={0.01} onChange={range("surfaceTension")} />
-        <Range label="Film viscosity" value={parameters.viscosity} min={0.02} max={1.5} step={0.01} onChange={range("viscosity")} />
-        <Range label="Marangoni elasticity" value={parameters.marangoni} min={0} max={2} step={0.01} onChange={range("marangoni")} />
-        <Range label="Surfactant diffusion" value={parameters.surfactantDiffusion} min={0} max={1} step={0.01} onChange={range("surfactantDiffusion")} />
+        <Range label="Gravity" value={parameters.gravity} min={0} max={20} step={0.1} unit=" m/s²" onChange={range("gravity")} />
+        <Range label="Surface tension" value={parameters.surfaceTension} min={10} max={80} step={0.5} unit=" mN/m" onChange={range("surfaceTension")} />
+        <Range label="Bulk viscosity" value={parameters.viscosity} min={0.5} max={40} step={0.1} unit=" mPa·s" onChange={range("viscosity")} />
+        <Range label="Gibbs elasticity" value={parameters.marangoni} min={0} max={120} step={1} unit=" mN/m" onChange={range("marangoni")} />
+        <Range label="Surface diffusivity" value={parameters.surfactantDiffusion} min={0} max={2000} step={10} unit=" µm²/s" onChange={range("surfactantDiffusion")} />
+        <Range label="Evaporation" value={parameters.evaporation} min={0} max={10} step={0.1} unit=" nm/s" onChange={range("evaporation")} />
+        <Range label="Ambient ΔT" value={parameters.thermalGradient} min={0} max={4} step={0.05} unit=" K" onChange={range("thermalGradient")} />
         <Range label="Time scale" value={parameters.speed} min={0.1} max={12} step={0.1} unit="×" onChange={range("speed")} />
       </div>
       <button className="reset-button" onClick={onReset}>
@@ -92,7 +94,7 @@ export function ControlPanel({
       </button>
       <details className="formula-card">
         <summary>What is being calculated? <span>+</span></summary>
-        <p>The GPU evolves <em>h, u, v, Γ</em>: thickness, tangent velocity, and insoluble surfactant concentration. Six overlapping spherical charts are remapped through a partition of unity, while geodesic stencils and parallel transport keep fluxes continuous across their overlaps. Nonlinear film mobility couples capillary pressure, Marangoni stress, viscosity, diffusion, and gravity. The 1× clock is calibrated to the visible drainage and convection timescale of a centimetre-scale soap bubble.</p>
+        <p>The GPU evolves thickness, three-component tangential momentum, surfactant concentration, and temperature on one icosahedral simplicial sphere. Cotangent Hodge operators, conservative dual-edge fluxes, and exact spherical parallel transport provide intrinsic derivatives without an atlas or pole. Gravity and evaporation supply energy; Gibbs and thermal Marangoni stresses convert it into the rising plumes and vortices seen in draining films. The 1× clock remains calibrated to a centimetre-scale bubble.</p>
       </details>
     </aside>
   );

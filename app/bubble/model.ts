@@ -7,6 +7,8 @@ export type SimulationParameters = {
   viscosity: number;
   marangoni: number;
   surfactantDiffusion: number;
+  evaporation: number;
+  thermalGradient: number;
   saturation: number;
   speed: number;
 };
@@ -21,39 +23,52 @@ export type CameraOrbit = {
 export type Vector3 = readonly [number, number, number];
 
 export const DEFAULT_PARAMETERS: SimulationParameters = {
-  thickness: 470,
-  variation: 430,
-  refractiveIndex: 1.33,
-  gravity: 0.66,
-  surfaceTension: 0.72,
-  viscosity: 0.26,
-  marangoni: 0.94,
-  surfactantDiffusion: 0.14,
-  saturation: 1.08,
+  thickness: 620,
+  variation: 520,
+  refractiveIndex: 1.335,
+  gravity: 9.81,
+  surfaceTension: 32,
+  viscosity: 1.6,
+  marangoni: 18,
+  surfactantDiffusion: 100,
+  evaporation: 1.8,
+  thermalGradient: 0.7,
+  saturation: 1.06,
   speed: 1,
 };
 
 export function parametersForPreset(name: PresetName): SimulationParameters {
   if (name === "fresh") {
-    return { ...DEFAULT_PARAMETERS, thickness: 760, variation: 310, gravity: 0.18, viscosity: 0.42 };
+    return {
+      ...DEFAULT_PARAMETERS,
+      thickness: 950,
+      variation: 380,
+      viscosity: 2.2,
+      evaporation: 0.8,
+      thermalGradient: 0.35,
+    };
   }
   if (name === "draining") {
     return {
       ...DEFAULT_PARAMETERS,
-      thickness: 360,
-      variation: 420,
-      gravity: 0.92,
-      viscosity: 0.28,
-      marangoni: 0.64,
+      thickness: 430,
+      variation: 650,
+      gravity: 9.81,
+      viscosity: 1.3,
+      marangoni: 14,
+      evaporation: 2.8,
+      thermalGradient: 1.1,
     };
   }
   return {
     ...DEFAULT_PARAMETERS,
-    thickness: 110,
-    variation: 220,
-    gravity: 0.66,
-    viscosity: 0.48,
-    marangoni: 0.58,
+    thickness: 120,
+    variation: 300,
+    gravity: 9.81,
+    viscosity: 3.5,
+    marangoni: 28,
+    evaporation: 0.5,
+    thermalGradient: 0.25,
     speed: 2.2,
     saturation: 0.94,
   };

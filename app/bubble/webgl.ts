@@ -48,85 +48,40 @@ export function uniformLocations<const T extends readonly string[]>(
   };
 }
 
-const CHART_EXTENT = 1.22;
-const VELOCITY_RANGE = 0.28;
-
-function normalize(vector: readonly number[]) {
-  const length = Math.hypot(vector[0], vector[1], vector[2]);
-  return vector.map((component) => component / length) as [number, number, number];
-}
-
-function cubeDirection(face: number, s: number, t: number) {
-  const chartS = s * CHART_EXTENT;
-  const chartT = t * CHART_EXTENT;
-  const vector = face === 0 ? [1, chartT, -chartS]
-    : face === 1 ? [-1, chartT, chartS]
-    : face === 2 ? [chartS, 1, -chartT]
-    : face === 3 ? [chartS, -1, chartT]
-    : face === 4 ? [chartS, chartT, 1]
-    : [-chartS, chartT, -1];
-  return normalize(vector);
-}
-
-function faceBasis(direction: readonly number[], face: number) {
-  const derivative = face === 0 ? [0, 0, -1]
-    : face === 1 ? [0, 0, 1]
-    : face === 5 ? [-1, 0, 0]
-    : [1, 0, 0];
-  const projection = derivative[0] * direction[0]
-    + derivative[1] * direction[1]
-    + derivative[2] * direction[2];
-  const tangentA = normalize([
-    derivative[0] - direction[0] * projection,
-    derivative[1] - direction[1] * projection,
-    derivative[2] - direction[2] * projection,
-  ]);
-  const tangentB: [number, number, number] = [
-    direction[1] * tangentA[2] - direction[2] * tangentA[1],
-    direction[2] * tangentA[0] - direction[0] * tangentA[2],
-    direction[0] * tangentA[1] - direction[1] * tangentA[0],
-  ];
-  return { tangentA, tangentB };
-}
-
-export function createInitialState(faceSize: number) {
-  const width = faceSize * 3;
-  const height = faceSize * 2;
-  const state = new Float32Array(width * height * 4);
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const index = (y * width + x) * 4;
-      const faceColumn = Math.floor(x / faceSize);
-      const faceRow = Math.floor(y / faceSize);
-      const face = faceColumn + faceRow * 3;
-      const s = (((x % faceSize) + 0.5) / faceSize) * 2 - 1;
-      const t = (((y % faceSize) + 0.5) / faceSize) * 2 - 1;
-      const direction = cubeDirection(face, s, t);
-      const [dx, dy, dz] = direction;
-      const patchA = Math.exp(-8.5 * (1 - (dx * 0.58 + dy * 0.31 + dz * 0.75)));
-      const patchB = Math.exp(-10 * (1 - (-dx * 0.73 + dy * 0.54 + dz * 0.42)));
-      state[index] = 0.555 - dy * 0.056
-        + dx * dz * 0.038
-        + (dx * dx - dz * dz) * 0.022
-        + dy * (3 * dz * dz - 1) * 0.018
-        + patchA * 0.026 - patchB * 0.021;
-
-      const gravityVelocity = [dx * dy, -1 + dy * dy, dz * dy] as const;
-      const { tangentA, tangentB } = faceBasis(direction, face);
-      const velocity = gravityVelocity.map((component) => component * 0.018);
-      const componentA = velocity[0] * tangentA[0]
-        + velocity[1] * tangentA[1]
-        + velocity[2] * tangentA[2];
-      const componentB = velocity[0] * tangentB[0]
-        + velocity[1] * tangentB[1]
-        + velocity[2] * tangentB[2];
-      state[index + 1] = componentA / VELOCITY_RANGE * 0.5 + 0.5;
-      state[index + 2] = componentB / VELOCITY_RANGE * 0.5 + 0.5;
-      state[index + 3] = 0.5
-        + dx * dz * 0.052
-        + dy * (dx * dx - dz * dz) * 0.038
-        - patchA * 0.024 + patchB * 0.018;
-    }
+export function stateUploadData(data: Float32Array, floatingPoint: boolean) {
+  if (floatingPoint) return data;
+  const bytes = new Uint8Array(data.length);
+  for (let index = 0; index < data.length; index += 1) {
+    bytes[index] = Math.round(Math.max(0, Math.min(1, data[index])) * 255);
   }
-  return { state, width, height };
+  return bytes;
+}
+
+export function createTexture(
+  gl: WebGL2RenderingContext,
+  width: number,
+  height: number,
+  internalFormat: number,
+  type: number,
+  data: ArrayBufferView | null,
+) {
+  const texture = gl.createTexture();
+  if (!texture) throw new Error("Unable to allocate texture");
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(
+    gl.TEXTURE_2D,
+    0,
+    internalFormat,
+    width,
+    height,
+    0,
+    gl.RGBA,
+    type,
+    data as ArrayBufferView,
+  );
+  return texture;
 }
