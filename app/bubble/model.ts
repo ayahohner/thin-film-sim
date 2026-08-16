@@ -15,6 +15,8 @@ export type SimulationParameters = {
 
 export type PresetName = "fresh" | "draining" | "aged";
 
+export type ColorGrade = "default" | "filmic" | "neutral" | "vivid";
+
 export type CameraOrbit = {
   yaw: number;
   pitch: number;

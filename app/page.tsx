@@ -10,6 +10,7 @@ import { ControlPanel } from "./bubble/ControlPanel";
 import {
   DEFAULT_PARAMETERS,
   parametersForPreset,
+  type ColorGrade,
   type PresetName,
   type SimulationParameters,
 } from "./bubble/model";
@@ -22,6 +23,8 @@ export default function Home() {
   const [interactionMode, setInteractionMode] = useState<InteractionMode>(
     "perturb",
   );
+  const [colorGrade, setColorGrade] = useState<ColorGrade>("default");
+  const [contrast, setContrast] = useState(1);
   const resetAfterStateUpdate = useCallback(() => {
     requestAnimationFrame(() => bubbleRef.current?.reset());
   }, []);
@@ -85,6 +88,8 @@ export default function Home() {
             parameters={parameters}
             paused={paused}
             interactionMode={interactionMode}
+            colorGrade={colorGrade}
+            contrast={contrast}
             onAvailabilityChange={setAvailable}
           />
           <div
@@ -116,7 +121,11 @@ export default function Home() {
         <ControlPanel
           parameters={parameters}
           paused={paused}
+          colorGrade={colorGrade}
+          contrast={contrast}
           onParameterChange={setParameter}
+          onColorGradeChange={setColorGrade}
+          onContrastChange={setContrast}
           onPauseToggle={() => setPaused((current) => !current)}
           onPreset={applyPreset}
           onReset={reset}
