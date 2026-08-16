@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { BubbleCanvas, type BubbleCanvasHandle } from "./bubble/BubbleCanvas";
 import { ControlPanel } from "./bubble/ControlPanel";
 import {
@@ -15,6 +15,9 @@ export default function Home() {
   const [parameters, setParameters] = useState(DEFAULT_PARAMETERS);
   const [paused, setPaused] = useState(false);
   const [available, setAvailable] = useState(true);
+  const resetAfterStateUpdate = useCallback(() => {
+    requestAnimationFrame(() => bubbleRef.current?.reset());
+  }, []);
 
   const setParameter = useCallback((
     key: keyof SimulationParameters,
@@ -25,13 +28,36 @@ export default function Home() {
 
   const applyPreset = useCallback((name: PresetName) => {
     setParameters(parametersForPreset(name));
-    bubbleRef.current?.reset();
-  }, []);
+    resetAfterStateUpdate();
+  }, [resetAfterStateUpdate]);
 
   const reset = useCallback(() => {
     setParameters(DEFAULT_PARAMETERS);
-    bubbleRef.current?.reset();
-  }, []);
+    resetAfterStateUpdate();
+  }, [resetAfterStateUpdate]);
+
+  useEffect(() => {
+    if (
+      new URLSearchParams(window.location.search).get("diagnostics") !== "1"
+    ) return;
+    const api = {
+      ready: true,
+      reset,
+      pause: () => setPaused(true),
+      resume: () => setPaused(false),
+      setParameters: (next: Partial<SimulationParameters>) => {
+        setParameters((current) => ({ ...current, ...next }));
+        resetAfterStateUpdate();
+      },
+      setPreset: applyPreset,
+      capture: () => bubbleRef.current?.capture() ?? null,
+      report: () => bubbleRef.current?.diagnostics() ?? null,
+    };
+    window.__bubbleFilmLab = api;
+    return () => {
+      if (window.__bubbleFilmLab === api) delete window.__bubbleFilmLab;
+    };
+  }, [applyPreset, reset, resetAfterStateUpdate]);
 
   return (
     <main className="lab-shell">

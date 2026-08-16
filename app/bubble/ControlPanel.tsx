@@ -85,8 +85,8 @@ export function ControlPanel({
         <Range label="Bulk viscosity" value={parameters.viscosity} min={0.5} max={40} step={0.1} unit=" mPa·s" onChange={range("viscosity")} />
         <Range label="Gibbs elasticity" value={parameters.marangoni} min={0} max={120} step={1} unit=" mN/m" onChange={range("marangoni")} />
         <Range label="Surface diffusivity" value={parameters.surfactantDiffusion} min={0} max={2000} step={10} unit=" µm²/s" onChange={range("surfactantDiffusion")} />
-        <Range label="Evaporation" value={parameters.evaporation} min={0} max={10} step={0.1} unit=" nm/s" onChange={range("evaporation")} />
-        <Range label="Ambient ΔT" value={parameters.thermalGradient} min={0} max={4} step={0.05} unit=" K" onChange={range("thermalGradient")} />
+        <Range label="Evaporation" value={parameters.evaporation} min={0} max={40} step={0.1} unit=" nm/s" onChange={range("evaporation")} />
+        <Range label="Ambient ΔT" value={parameters.thermalGradient} min={0} max={12} step={0.05} unit=" K" onChange={range("thermalGradient")} />
         <Range label="Time scale" value={parameters.speed} min={0.1} max={12} step={0.1} unit="×" onChange={range("speed")} />
       </div>
       <button className="reset-button" onClick={onReset}>
@@ -94,7 +94,7 @@ export function ControlPanel({
       </button>
       <details className="formula-card">
         <summary>What is being calculated? <span>+</span></summary>
-        <p>The GPU evolves thickness, three-component tangential momentum, surfactant concentration, and temperature on one icosahedral simplicial sphere. Cotangent Hodge operators, conservative dual-edge fluxes, and exact spherical parallel transport provide intrinsic derivatives without an atlas or pole. Gravity and evaporation supply energy; Gibbs and thermal Marangoni stresses convert it into the rising plumes and vortices seen in draining films. The 1× clock remains calibrated to a centimetre-scale bubble.</p>
+        <p>The GPU evolves physical thickness, tangential momentum, insoluble surfactant, and temperature on one closed icosahedral manifold. Cotangent operators, conservative dual-edge fluxes, and spherical parallel transport avoid an atlas, seam, or pole. Lubrication capillarity, SI gravity, Langmuir Marangoni stress, evaporation, and DLVO pressure use published forms; unresolved cross-film and air coupling use an explicitly documented partially-mobile-interface closure. At 1×, one model second is exactly one wall-clock second.</p>
       </details>
     </aside>
   );

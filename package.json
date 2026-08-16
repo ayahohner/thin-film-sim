@@ -10,7 +10,9 @@
     "dev": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vite",
     "build": "bash scripts/build-verified.sh",
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs",
+    "test": "npm run test:solver && npm run build && node --test tests/rendered-html.test.mjs",
+    "test:solver": "node --no-warnings --experimental-loader ./tests/typescript-loader.mjs --test tests/solver.test.ts",
+    "analyze:solver": "node --no-warnings --experimental-loader ./tests/typescript-loader.mjs scripts/analyze-solver.ts",
     "validate:artifact": "bash scripts/validate-artifact.sh",
     "lint": "bash scripts/sites-env.sh -- eslint . --ignore-pattern dist --ignore-pattern .next"
   },
