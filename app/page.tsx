@@ -178,7 +178,9 @@ in vec2 v_uv;
 out vec4 outColor;
 uniform sampler2D u_state;
 uniform vec2 u_resolution;
+uniform vec2 u_stateTexel;
 uniform float u_time;
+uniform float u_cameraOrbit;
 uniform float u_thickness;
 uniform float u_variation;
 uniform float u_ior;
@@ -188,6 +190,12 @@ float hash(vec2 p) { return fract(sin(dot(p, vec2(41.31, 289.97))) * 9173.21); }
 
 vec4 sphereState(vec2 uv) {
   return texture(u_state, vec2(fract(uv.x), clamp(uv.y, 0.0, 1.0)));
+}
+
+vec3 rotateY(vec3 p, float angle) {
+  float c = cos(angle);
+  float s = sin(angle);
+  return vec3(c * p.x + s * p.z, p.y, -s * p.x + c * p.z);
 }
 
 float filmReflectance(float lambda, float thickness, float cosTheta, float interfaceR) {
@@ -231,17 +239,30 @@ void main() {
   }
 
   float z = sqrt(max(0.0, 1.0 - r2));
-  vec3 normal = normalize(vec3(q / radius, z));
-  vec3 viewDir = vec3(0.0, 0.0, 1.0);
-  float cosView = max(dot(normal, viewDir), 0.0);
-  float sinInternal2 = max(0.0, 1.0 - cosView * cosView) / (u_ior * u_ior);
-  float cosInternal = sqrt(max(0.025, 1.0 - sinInternal2));
+  vec3 screenNormal = normalize(vec3(q / radius, z));
+  vec3 worldNormal = rotateY(screenNormal, u_cameraOrbit);
+  vec3 viewDir = rotateY(vec3(0.0, 0.0, 1.0), u_cameraOrbit);
 
   vec2 bubbleUv = vec2(
-    fract(atan(normal.x, normal.z) / 6.2831853 + 0.5),
-    asin(clamp(normal.y, -1.0, 1.0)) / 3.14159265 + 0.5
+    fract(atan(worldNormal.x, worldNormal.z) / 6.2831853 + 0.5),
+    asin(clamp(worldNormal.y, -1.0, 1.0)) / 3.14159265 + 0.5
   );
   vec4 state = sphereState(bubbleUv);
+  float hL = sphereState(bubbleUv - vec2(u_stateTexel.x, 0.0)).r;
+  float hR = sphereState(bubbleUv + vec2(u_stateTexel.x, 0.0)).r;
+  float hB = sphereState(bubbleUv - vec2(0.0, u_stateTexel.y)).r;
+  float hT = sphereState(bubbleUv + vec2(0.0, u_stateTexel.y)).r;
+  float longitude = (bubbleUv.x - 0.5) * 6.2831853;
+  vec3 tangentLongitude = vec3(cos(longitude), 0.0, -sin(longitude));
+  vec3 tangentLatitude = normalize(cross(worldNormal, tangentLongitude));
+  float latitudeScale = max(0.24, cos((bubbleUv.y - 0.5) * 3.14159265));
+  vec2 filmSlope = vec2((hR - hL) / latitudeScale, hT - hB) * 16.0;
+  vec3 opticalNormal = normalize(worldNormal
+    - tangentLongitude * filmSlope.x
+    - tangentLatitude * filmSlope.y);
+  float cosView = max(dot(opticalNormal, viewDir), 0.0);
+  float sinInternal2 = max(0.0, 1.0 - cosView * cosView) / (u_ior * u_ior);
+  float cosInternal = sqrt(max(0.025, 1.0 - sinInternal2));
   float bottomMeniscus = pow(max(0.0, 1.0 - bubbleUv.y), 5.0) * 0.12;
   float relativeHeight = state.r - 0.54 + bottomMeniscus;
   float thickness = max(7.0, u_thickness + relativeHeight * u_variation * 3.1);
@@ -256,12 +277,12 @@ void main() {
   vec3 fillDir = normalize(vec3(0.58, -0.18, 0.79));
   vec3 keyHalf = normalize(keyDir + viewDir);
   vec3 fillHalf = normalize(fillDir + viewDir);
-  float keySpec = pow(max(dot(normal, keyHalf), 0.0), 170.0);
-  float fillSpec = pow(max(dot(normal, fillHalf), 0.0), 105.0);
-  float broadSpec = pow(max(dot(normal, keyHalf), 0.0), 22.0);
-  float diffuse = max(dot(normal, keyDir), 0.0) * 0.62 + max(dot(normal, fillDir), 0.0) * 0.38;
-  float studioStrip = pow(max(0.0, 1.0 - abs(normal.x + 0.57) * 2.7), 10.0) * smoothstep(-0.55, 0.8, normal.y);
-  float lowerStrip = pow(max(0.0, 1.0 - abs(normal.y + 0.52) * 3.4), 12.0) * smoothstep(-0.1, 0.9, normal.x);
+  float keySpec = pow(max(dot(opticalNormal, keyHalf), 0.0), 170.0);
+  float fillSpec = pow(max(dot(opticalNormal, fillHalf), 0.0), 105.0);
+  float broadSpec = pow(max(dot(opticalNormal, keyHalf), 0.0), 22.0);
+  float diffuse = max(dot(opticalNormal, keyDir), 0.0) * 0.62 + max(dot(opticalNormal, fillDir), 0.0) * 0.38;
+  float studioStrip = pow(max(0.0, 1.0 - abs(opticalNormal.x + 0.57) * 2.7), 10.0) * smoothstep(-0.55, 0.8, opticalNormal.y);
+  float lowerStrip = pow(max(0.0, 1.0 - abs(opticalNormal.y + 0.52) * 3.4), 12.0) * smoothstep(-0.1, 0.9, opticalNormal.x);
 
   float edge = smoothstep(0.72, 1.0, sqrt(r2));
   vec3 transmitted = backdrop * (0.88 + 0.08 * z);
@@ -321,6 +342,8 @@ export default function Home() {
   const paramsRef = useRef(DEFAULTS);
   const pointerRef = useRef({ x: 0.5, y: 0.5, vx: 0, vy: 0, down: 0, lastTime: 0 });
   const resetRef = useRef<() => void>(() => {});
+  const shiftRef = useRef(false);
+  const cameraOrbitRef = useRef(0);
   const [params, setParams] = useState(DEFAULTS);
   const [paused, setPaused] = useState(false);
   const pausedRef = useRef(false);
@@ -328,6 +351,23 @@ export default function Home() {
 
   useEffect(() => { paramsRef.current = params; }, [params]);
   useEffect(() => { pausedRef.current = paused; }, [paused]);
+  useEffect(() => {
+    const keyDown = (event: KeyboardEvent) => {
+      if (event.key === "Shift") shiftRef.current = true;
+    };
+    const keyUp = (event: KeyboardEvent) => {
+      if (event.key === "Shift") shiftRef.current = false;
+    };
+    const release = () => { shiftRef.current = false; };
+    window.addEventListener("keydown", keyDown);
+    window.addEventListener("keyup", keyUp);
+    window.addEventListener("blur", release);
+    return () => {
+      window.removeEventListener("keydown", keyDown);
+      window.removeEventListener("keyup", keyUp);
+      window.removeEventListener("blur", release);
+    };
+  }, []);
   const set = useCallback((key: keyof Parameters, value: number) => {
     setParams((current) => ({ ...current, [key]: value }));
   }, []);
@@ -412,6 +452,9 @@ export default function Home() {
         const p = paramsRef.current;
         const frameElapsed = Math.min(0.033, (now - last) / 1000);
         last = now;
+        if (shiftRef.current) {
+          cameraOrbitRef.current = (cameraOrbitRef.current + frameElapsed * 0.42) % (Math.PI * 2);
+        }
         if (!pausedRef.current) {
           const acceleratedElapsed = frameElapsed * p.speed;
           const substeps = Math.max(1, Math.ceil(acceleratedElapsed / 0.022));
@@ -448,7 +491,9 @@ export default function Home() {
         gl.bindTexture(gl.TEXTURE_2D, textures[read]);
         gl.uniform1i(uniform(drawProgram, "u_state"), 0);
         gl.uniform2f(uniform(drawProgram, "u_resolution"), canvas.width, canvas.height);
+        gl.uniform2f(uniform(drawProgram, "u_stateTexel"), 1/simSize, 1/simSize);
         gl.uniform1f(uniform(drawProgram, "u_time"), simTime);
+        gl.uniform1f(uniform(drawProgram, "u_cameraOrbit"), cameraOrbitRef.current);
         gl.uniform1f(uniform(drawProgram, "u_thickness"), p.thickness);
         gl.uniform1f(uniform(drawProgram, "u_variation"), p.variation);
         gl.uniform1f(uniform(drawProgram, "u_ior"), p.refractiveIndex);
@@ -480,7 +525,7 @@ export default function Home() {
     const nx = qx / radius;
     const ny = qy / radius;
     const nz = Math.sqrt(Math.max(0, 1 - radial));
-    const x = Math.atan2(nx, nz) / (Math.PI * 2) + 0.5;
+    const x = Math.atan2(nx, nz) / (Math.PI * 2) + 0.5 + cameraOrbitRef.current / (Math.PI * 2);
     const y = Math.asin(Math.max(-1, Math.min(1, ny))) / Math.PI + 0.5;
     const previous = pointerRef.current;
     const eventTime = event.timeStamp / 1000;
