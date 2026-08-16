@@ -9,6 +9,8 @@ type Parameters = {
   drainage: number;
   tension: number;
   flow: number;
+  convection: number;
+  microFilm: number;
   lightAngle: number;
   saturation: number;
   speed: number;
@@ -21,6 +23,8 @@ const DEFAULTS: Parameters = {
   drainage: 0.36,
   tension: 0.42,
   flow: 0.68,
+  convection: 0.72,
+  microFilm: 0.7,
   lightAngle: -28,
   saturation: 1.08,
   speed: 1,
@@ -45,6 +49,8 @@ uniform float u_dt;
 uniform float u_flow;
 uniform float u_gravity;
 uniform float u_tension;
+uniform float u_convection;
+uniform float u_microFilm;
 uniform vec2 u_pointer;
 uniform float u_pointerDown;
 
@@ -59,36 +65,103 @@ float noise(vec2 p) {
              mix(hash(i + vec2(0,1)), hash(i + vec2(1,1)), f.x), f.y);
 }
 
-float field(vec2 p) {
-  return noise(p * 3.1 + vec2(u_time * 0.055, -u_time * 0.035))
-       + 0.46 * noise(p * 7.3 - vec2(u_time * 0.10, u_time * 0.045));
+float turbulence(vec2 p) {
+  return noise(p * 3.1 + vec2(u_time * 0.045, -u_time * 0.028))
+       + 0.48 * noise(p * 7.4 - vec2(u_time * 0.075, u_time * 0.04))
+       + 0.20 * noise(p * 15.3 + vec2(-u_time * 0.055, u_time * 0.08));
+}
+
+float cellular(vec2 p) {
+  vec2 cell = floor(p);
+  vec2 local = fract(p);
+  float nearest = 2.0;
+  for (int y = -1; y <= 1; y++) {
+    for (int x = -1; x <= 1; x++) {
+      vec2 offset = vec2(float(x), float(y));
+      vec2 point = vec2(hash(cell + offset), hash(cell + offset + 19.73));
+      point = 0.5 + 0.42 * sin(u_time * (0.08 + 0.05 * point) + 6.2831 * point);
+      nearest = min(nearest, length(offset + point - local));
+    }
+  }
+  return nearest;
 }
 
 void main() {
   vec2 uv = v_uv;
-  float e = 0.012;
-  float nx = field(uv + vec2(e, 0.0)) - field(uv - vec2(e, 0.0));
-  float ny = field(uv + vec2(0.0, e)) - field(uv - vec2(0.0, e));
-  vec2 velocity = vec2(ny, -nx) * (0.64 * u_flow);
-  velocity.y -= u_gravity * (0.075 + 0.075 * (1.0 - uv.y));
+  vec4 center = texture(u_state, uv);
+  vec4 leftState = texture(u_state, clamp(uv - vec2(u_texel.x,0),0.0,1.0));
+  vec4 rightState = texture(u_state, clamp(uv + vec2(u_texel.x,0),0.0,1.0));
+  vec4 bottomState = texture(u_state, clamp(uv - vec2(0,u_texel.y),0.0,1.0));
+  vec4 topState = texture(u_state, clamp(uv + vec2(0,u_texel.y),0.0,1.0));
+
+  float e = 0.009;
+  float nx = turbulence(uv + vec2(e, 0.0)) - turbulence(uv - vec2(e, 0.0));
+  float ny = turbulence(uv + vec2(0.0, e)) - turbulence(uv - vec2(0.0, e));
+  vec2 velocity = vec2(ny, -nx) * (0.42 * u_flow);
+
+  // Incompressible convection rolls from a slowly changing stream function.
+  float phase = u_time * 0.11;
+  float sx = 6.2831 * uv.x + phase;
+  float sy = 3.1416 * uv.y;
+  vec2 rolls = vec2(
+    3.1416 * sin(sx) * cos(sy),
+    -6.2831 * cos(sx) * sin(sy)
+  ) * 0.018;
+  float sx2 = 12.5662 * uv.x - phase * 0.7 + 1.8;
+  float sy2 = 6.2831 * uv.y;
+  rolls += vec2(6.2831 * sin(sx2) * cos(sy2), -12.5662 * cos(sx2) * sin(sy2)) * 0.0045;
+  velocity += rolls * u_convection;
+
+  // Surfactant/temperature gradients produce Marangoni surface motion.
+  vec2 scalarGradient = vec2(rightState.g - leftState.g, topState.g - bottomState.g);
+  velocity -= scalarGradient * (1.6 * u_convection);
+  velocity.y += (center.g - 0.5) * 0.11 * u_convection;
+  velocity.y -= u_gravity * (0.045 + 0.11 * center.r * center.r);
 
   vec2 d = uv - u_pointer;
-  float influence = exp(-dot(d, d) * 56.0) * u_pointerDown;
-  velocity += vec2(-d.y, d.x) * influence * 7.0;
+  float influence = exp(-dot(d, d) * 54.0) * u_pointerDown;
+  velocity += vec2(-d.y, d.x) * influence * 7.5;
 
   vec2 source = clamp(uv - velocity * u_dt, u_texel, 1.0 - u_texel);
-  float h = texture(u_state, source).r;
-  float l = texture(u_state, clamp(source - vec2(u_texel.x,0),0.0,1.0)).r;
-  float r = texture(u_state, clamp(source + vec2(u_texel.x,0),0.0,1.0)).r;
-  float b = texture(u_state, clamp(source - vec2(0,u_texel.y),0.0,1.0)).r;
-  float t = texture(u_state, clamp(source + vec2(0,u_texel.y),0.0,1.0)).r;
-  float laplacian = l + r + b + t - 4.0 * h;
+  vec4 state = texture(u_state, source);
+  float h = state.r;
+  float scalar = state.g;
+  float blackFilm = state.b;
 
-  h += laplacian * u_tension * 0.15;
-  h -= u_gravity * u_dt * (0.003 + 0.005 * uv.y);
-  h += u_gravity * u_dt * smoothstep(0.22, 0.0, uv.y) * 0.028;
-  h += (0.5 - h) * u_dt * 0.003;
-  outColor = vec4(clamp(h, 0.015, 0.985), 0.0, 0.0, 1.0);
+  float hL = texture(u_state, clamp(source - vec2(u_texel.x,0),0.0,1.0)).r;
+  float hR = texture(u_state, clamp(source + vec2(u_texel.x,0),0.0,1.0)).r;
+  float hB = texture(u_state, clamp(source - vec2(0,u_texel.y),0.0,1.0)).r;
+  float hT = texture(u_state, clamp(source + vec2(0,u_texel.y),0.0,1.0)).r;
+  float lapH = hL + hR + hB + hT - 4.0 * h;
+  float sL = texture(u_state, clamp(source - vec2(u_texel.x,0),0.0,1.0)).g;
+  float sR = texture(u_state, clamp(source + vec2(u_texel.x,0),0.0,1.0)).g;
+  float sB = texture(u_state, clamp(source - vec2(0,u_texel.y),0.0,1.0)).g;
+  float sT = texture(u_state, clamp(source + vec2(0,u_texel.y),0.0,1.0)).g;
+  float lapScalar = sL + sR + sB + sT - 4.0 * scalar;
+
+  // Capillary leveling, nonlinear gravitational drainage, and lower meniscus.
+  h += lapH * (0.08 + 0.18 * u_tension) * (0.55 + h);
+  h -= u_gravity * u_dt * (0.002 + 0.012 * h * h) * (0.7 + uv.y);
+  h += u_gravity * u_dt * smoothstep(0.24, 0.0, uv.y) * 0.055;
+  h += scalarGradient.y * u_dt * 0.06 * u_convection;
+
+  float heatSource = 0.5 + 0.20 * sin(6.2831 * uv.x + u_time * 0.08) * sin(3.1416 * uv.y);
+  heatSource += 0.10 * (0.5 - uv.y) + 0.08 * (turbulence(uv * 0.7) - 0.7);
+  scalar += lapScalar * (0.07 + 0.08 * u_tension);
+  scalar += (heatSource - scalar) * u_dt * 0.035;
+
+  // Ultra-thin common-black-film islands nucleate in drained upper regions.
+  vec2 microUv = uv * vec2(13.0, 15.0) + vec2(turbulence(uv) * 0.42, -u_time * 0.035);
+  float cell = 1.0 - smoothstep(0.075, 0.22, cellular(microUv));
+  float thinEnough = 1.0 - smoothstep(0.46, 0.62, h);
+  float upperFilm = smoothstep(0.34, 0.92, uv.y);
+  float targetBlack = cell * thinEnough * upperFilm * u_microFilm;
+  blackFilm += (targetBlack - blackFilm) * u_dt * mix(0.18, 0.78, targetBlack);
+  blackFilm = clamp(blackFilm, 0.0, 1.0);
+  h -= blackFilm * u_dt * 0.025;
+  h += (0.5 - h) * u_dt * 0.0012;
+
+  outColor = vec4(clamp(h, 0.012, 0.988), clamp(scalar, 0.02, 0.98), blackFilm, 1.0);
 }`;
 
 const displayShader = `#version 300 es
@@ -106,9 +179,25 @@ uniform float u_saturation;
 
 float hash(vec2 p) { return fract(sin(dot(p, vec2(41.31, 289.97))) * 9173.21); }
 
-float interference(float lambda, float thickness, float cosTheta) {
-  float phase = 12.5663706 * u_ior * thickness * cosTheta / lambda + 3.14159265;
-  return 0.5 + 0.5 * cos(phase);
+float filmReflectance(float lambda, float thickness, float cosTheta, float interfaceR) {
+  float beta = 6.2831853 * u_ior * thickness * cosTheta / lambda;
+  float s2 = pow(sin(beta), 2.0);
+  float numerator = 4.0 * interfaceR * s2;
+  float denominator = pow(1.0 - interfaceR, 2.0) + numerator;
+  return numerator / max(denominator, 0.0001);
+}
+
+vec3 spectrum(float thickness, float cosTheta, float interfaceR) {
+  vec3 color = vec3(0.0);
+  color += filmReflectance(420.0, thickness, cosTheta, interfaceR) * vec3(0.34, 0.02, 0.90) * 0.74;
+  color += filmReflectance(455.0, thickness, cosTheta, interfaceR) * vec3(0.08, 0.18, 1.00) * 0.92;
+  color += filmReflectance(490.0, thickness, cosTheta, interfaceR) * vec3(0.00, 0.72, 0.82) * 1.02;
+  color += filmReflectance(525.0, thickness, cosTheta, interfaceR) * vec3(0.08, 1.00, 0.25) * 1.05;
+  color += filmReflectance(565.0, thickness, cosTheta, interfaceR) * vec3(0.75, 0.95, 0.02) * 1.03;
+  color += filmReflectance(600.0, thickness, cosTheta, interfaceR) * vec3(1.00, 0.48, 0.00) * 0.98;
+  color += filmReflectance(640.0, thickness, cosTheta, interfaceR) * vec3(1.00, 0.08, 0.01) * 0.91;
+  color += filmReflectance(680.0, thickness, cosTheta, interfaceR) * vec3(0.72, 0.00, 0.02) * 0.72;
+  return color * 0.28;
 }
 
 void main() {
@@ -118,16 +207,16 @@ void main() {
   q.x *= aspect;
   float radius = min(0.425 * aspect, 0.455);
   float r2 = dot(q, q) / (radius * radius);
-  float grain = hash(gl_FragCoord.xy + floor(u_time * 2.0));
+  float grain = hash(gl_FragCoord.xy + floor(u_time * 1.7));
 
-  vec3 backdrop = vec3(0.012, 0.017, 0.026);
+  vec3 backdrop = vec3(0.010, 0.014, 0.021);
   float glow = exp(-dot(q - vec2(-0.22, 0.18), q - vec2(-0.22, 0.18)) * 3.2);
-  backdrop += vec3(0.016, 0.029, 0.045) * glow;
-  backdrop += (grain - 0.5) * 0.006;
+  backdrop += vec3(0.014, 0.026, 0.041) * glow;
+  backdrop += (grain - 0.5) * 0.004;
 
   if (r2 > 1.0) {
-    float halo = exp(-abs(sqrt(r2) - 1.0) * 28.0) * 0.07;
-    outColor = vec4(backdrop + halo * vec3(0.2, 0.5, 0.8), 1.0);
+    float halo = exp(-abs(sqrt(r2) - 1.0) * 30.0) * 0.06;
+    outColor = vec4(backdrop + halo * vec3(0.18, 0.44, 0.68), 1.0);
     return;
   }
 
@@ -136,42 +225,52 @@ void main() {
   vec3 viewDir = vec3(0.0, 0.0, 1.0);
   float cosView = max(dot(normal, viewDir), 0.0);
   float sinInternal2 = max(0.0, 1.0 - cosView * cosView) / (u_ior * u_ior);
-  float cosInternal = sqrt(max(0.04, 1.0 - sinInternal2));
+  float cosInternal = sqrt(max(0.025, 1.0 - sinInternal2));
 
   vec2 bubbleUv = q / (2.0 * radius) + 0.5;
-  float state = texture(u_state, clamp(bubbleUv, 0.0, 1.0)).r;
-  float bottomMeniscus = pow(max(0.0, 1.0 - bubbleUv.y), 5.0) * 0.24;
-  float thickness = max(8.0, u_thickness + (state - 0.5 + bottomMeniscus) * u_variation * 2.0);
+  vec2 stateTexel = vec2(1.0 / 320.0);
+  vec4 state = texture(u_state, clamp(bubbleUv, 0.0, 1.0));
+  float blackL = texture(u_state, clamp(bubbleUv - vec2(stateTexel.x,0),0.0,1.0)).b;
+  float blackR = texture(u_state, clamp(bubbleUv + vec2(stateTexel.x,0),0.0,1.0)).b;
+  float blackB = texture(u_state, clamp(bubbleUv - vec2(0,stateTexel.y),0.0,1.0)).b;
+  float blackT = texture(u_state, clamp(bubbleUv + vec2(0,stateTexel.y),0.0,1.0)).b;
+  float blackGradient = length(vec2(blackR - blackL, blackT - blackB));
+  float blackFilm = smoothstep(0.12, 0.72, state.b);
 
-  vec3 spectral = vec3(
-    interference(650.0, thickness, cosInternal),
-    interference(535.0, thickness, cosInternal),
-    interference(455.0, thickness, cosInternal)
-  );
-  spectral = pow(spectral, vec3(1.35));
+  float bottomMeniscus = pow(max(0.0, 1.0 - bubbleUv.y), 5.0) * 0.28;
+  float thickness = max(7.0, u_thickness + (state.r - 0.5 + bottomMeniscus) * u_variation * 2.0);
+  thickness = mix(thickness, 11.0 + 7.0 * state.g, blackFilm);
+
+  float f0 = pow((u_ior - 1.0) / (u_ior + 1.0), 2.0);
+  float interfaceR = f0 + (1.0 - f0) * pow(1.0 - cosView, 5.0);
+  vec3 spectral = spectrum(thickness, cosInternal, interfaceR);
   float luminance = dot(spectral, vec3(0.2126, 0.7152, 0.0722));
   spectral = mix(vec3(luminance), spectral, u_saturation);
 
-  float f0 = pow((u_ior - 1.0) / (u_ior + 1.0), 2.0);
-  float fresnel = f0 + (1.0 - f0) * pow(1.0 - cosView, 5.0);
   float angle = radians(u_lightAngle);
   vec3 lightDir = normalize(vec3(sin(angle), 0.42, cos(angle)));
   vec3 halfDir = normalize(lightDir + viewDir);
-  float spec = pow(max(dot(normal, halfDir), 0.0), 180.0);
-  float broadSpec = pow(max(dot(normal, halfDir), 0.0), 24.0);
+  float spec = pow(max(dot(normal, halfDir), 0.0), 210.0);
+  float broadSpec = pow(max(dot(normal, halfDir), 0.0), 30.0);
+  float studioStrip = pow(max(0.0, 1.0 - abs(normal.x + 0.58) * 2.8), 12.0) * smoothstep(-0.4, 0.7, normal.y);
 
   float edge = smoothstep(0.72, 1.0, sqrt(r2));
-  vec3 transmitted = backdrop * (0.76 + 0.18 * z);
-  vec3 film = spectral * (0.18 + fresnel * 1.35) + broadSpec * vec3(0.08,0.10,0.12);
-  film += spec * vec3(1.25, 1.20, 1.08);
-  film += edge * vec3(0.08, 0.11, 0.15);
-  film *= 0.78 + 0.22 * z;
+  vec3 transmitted = backdrop * (0.82 + 0.12 * z);
+  transmitted += vec3(0.010, 0.014, 0.018) * state.g;
+  vec3 film = spectral * (0.78 + edge * 1.45);
+  film += broadSpec * vec3(0.045,0.055,0.065);
+  film += spec * vec3(1.10, 1.06, 0.98);
+  film += studioStrip * vec3(0.10, 0.12, 0.13) * (0.35 + edge);
+  film *= 0.82 + 0.18 * z;
+  film *= mix(1.0, 0.08, blackFilm);
   vec3 color = transmitted + film;
 
-  float rim = smoothstep(0.955, 0.995, sqrt(r2));
-  color += rim * vec3(0.24, 0.34, 0.46);
-  color += (grain - 0.5) * 0.012;
-  outColor = vec4(pow(max(color, 0.0), vec3(0.86)), 1.0);
+  float microRim = smoothstep(0.018, 0.13, blackGradient) * (0.4 + 0.6 * edge);
+  color += microRim * vec3(0.22, 0.28, 0.32);
+  float rim = smoothstep(0.952, 0.997, sqrt(r2));
+  color += rim * vec3(0.23, 0.31, 0.42);
+  color += (grain - 0.5) * 0.009;
+  outColor = vec4(pow(max(color, 0.0), vec3(0.84)), 1.0);
 }`;
 
 function compile(gl: WebGL2RenderingContext, type: number, source: string) {
@@ -253,7 +352,8 @@ export default function Home() {
         const i = (y * simSize + x) * 4;
         const waves = Math.sin(x * 0.071) * Math.cos(y * 0.053) + Math.sin((x+y) * 0.026);
         const value = Math.max(8, Math.min(247, 126 + waves * 23 + Math.random() * 11 + (1-y/simSize) * 18));
-        seed[i] = value; seed[i+1] = 0; seed[i+2] = 0; seed[i+3] = 255;
+        const thermal = Math.max(12, Math.min(243, 126 + Math.sin(x * 0.028 + y * 0.017) * 34 + (0.5-y/simSize) * 24 + Math.random() * 9));
+        seed[i] = value; seed[i+1] = thermal; seed[i+2] = 0; seed[i+3] = 255;
       }
       textures.forEach((texture, index) => {
         gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -304,6 +404,8 @@ export default function Home() {
           gl.uniform1f(uniform(simProgram, "u_flow"), p.flow);
           gl.uniform1f(uniform(simProgram, "u_gravity"), p.drainage);
           gl.uniform1f(uniform(simProgram, "u_tension"), p.tension);
+          gl.uniform1f(uniform(simProgram, "u_convection"), p.convection);
+          gl.uniform1f(uniform(simProgram, "u_microFilm"), p.microFilm);
           gl.uniform2f(uniform(simProgram, "u_pointer"), pointerRef.current.x, pointerRef.current.y);
           gl.uniform1f(uniform(simProgram, "u_pointerDown"), pointerRef.current.down);
           gl.drawArrays(gl.TRIANGLES, 0, 6);
@@ -344,9 +446,9 @@ export default function Home() {
   };
 
   const preset = (name: "fresh" | "draining" | "black") => {
-    const next = name === "fresh" ? { ...DEFAULTS, thickness: 740, variation: 410, drainage: 0.18 }
-      : name === "draining" ? { ...DEFAULTS, thickness: 370, variation: 300, drainage: 0.78, flow: 0.82 }
-      : { ...DEFAULTS, thickness: 72, variation: 58, drainage: 0.18, flow: 0.24, saturation: 0.9 };
+    const next = name === "fresh" ? { ...DEFAULTS, thickness: 740, variation: 410, drainage: 0.18, microFilm: 0.18 }
+      : name === "draining" ? { ...DEFAULTS, thickness: 350, variation: 330, drainage: 0.82, flow: 0.82, convection: 0.9, microFilm: 0.9 }
+      : { ...DEFAULTS, thickness: 68, variation: 52, drainage: 0.2, flow: 0.3, convection: 0.42, microFilm: 1.0, saturation: 0.92 };
     setParams(next);
     resetRef.current();
   };
@@ -367,9 +469,9 @@ export default function Home() {
             onPointerUp={(e) => pointer(e, 0)} onPointerCancel={(e) => pointer(e, 0)} />
           {!available && <div className="webgl-fallback">This simulation needs a browser with WebGL 2 enabled.</div>}
           <div className="stage-copy">
-            <p className="eyebrow">THIN-FILM INTERFERENCE / ADVECTION-DIFFUSION</p>
+            <p className="eyebrow">THIN-FILM INTERFERENCE / MARANGONI CONVECTION</p>
             <h1>Light, flowing<br />over a surface.</h1>
-            <p className="intro">A living model of a soap film: thickness is advected by a curl field, drained by gravity, smoothed by surface tension, then translated into color wavelength by wavelength.</p>
+            <p className="intro">A living soap-film model: buoyant convection rolls couple to surfactant flow, gravity drainage and capillary leveling—then a spectral solver turns the moving thickness into reflected color.</p>
           </div>
           <div className="drag-hint"><span>↗</span> DRAG THE FILM TO STIR</div>
           <div className="readout thickness-readout"><span>MEAN FILM</span><strong>{params.thickness.toFixed(0)} nm</strong></div>
@@ -395,13 +497,15 @@ export default function Home() {
             <h3>Fluid model</h3>
             <Range label="Gravity drainage" value={params.drainage} min={0} max={1.2} step={0.01} onChange={v => set("drainage", v)} />
             <Range label="Surface tension" value={params.tension} min={0} max={1} step={0.01} onChange={v => set("tension", v)} />
-            <Range label="Flow energy" value={params.flow} min={0} max={1.4} step={0.01} onChange={v => set("flow", v)} />
+            <Range label="Turbulent flow" value={params.flow} min={0} max={1.4} step={0.01} onChange={v => set("flow", v)} />
+            <Range label="Thermal convection" value={params.convection} min={0} max={1.4} step={0.01} onChange={v => set("convection", v)} />
+            <Range label="Black-film islands" value={params.microFilm} min={0} max={1} step={0.01} onChange={v => set("microFilm", v)} />
             <Range label="Time scale" value={params.speed} min={0.1} max={2.5} step={0.1} unit="×" onChange={v => set("speed", v)} />
           </div>
           <button className="reset-button" onClick={() => { setParams(DEFAULTS); resetRef.current(); }}>Reset experiment <span>↺</span></button>
           <details className="formula-card">
             <summary>What is being calculated? <span>+</span></summary>
-            <p>For each RGB wavelength, reflected intensity follows <em>I ∝ 1 + cos(4πnt cos θ / λ + π)</em>. The extra π is the phase reversal at the first air–film boundary.</p>
+            <p>Eight visible wavelengths use the symmetric thin-film Airy reflectance. The local optical phase is <em>β = 2πnt cos θ / λ</em>; drained patches below roughly 20 nm become nearly transparent common black film.</p>
           </details>
         </aside>
       </section>
