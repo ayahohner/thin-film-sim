@@ -11,7 +11,6 @@ type Parameters = {
   flow: number;
   convection: number;
   microFilm: number;
-  lightAngle: number;
   saturation: number;
   speed: number;
 };
@@ -22,10 +21,9 @@ const DEFAULTS: Parameters = {
   refractiveIndex: 1.33,
   drainage: 0.36,
   tension: 0.42,
-  flow: 0.68,
-  convection: 0.72,
-  microFilm: 0.7,
-  lightAngle: -28,
+  flow: 0.9,
+  convection: 0.9,
+  microFilm: 0.9,
   saturation: 1.08,
   speed: 1,
 };
@@ -71,16 +69,29 @@ float turbulence(vec2 p) {
        + 0.20 * noise(p * 15.3 + vec2(-u_time * 0.055, u_time * 0.08));
 }
 
-float cellular(vec2 p) {
+vec2 sphereUv(vec2 uv) {
+  float x = uv.x;
+  float y = uv.y;
+  if (y < 0.0) { y = -y; x += 0.5; }
+  if (y > 1.0) { y = 2.0 - y; x += 0.5; }
+  return vec2(fract(x), clamp(y, 0.0, 1.0));
+}
+
+vec4 sampleSphere(vec2 uv) {
+  return texture(u_state, sphereUv(uv));
+}
+
+float cellularVar(vec2 p, float seed) {
   vec2 cell = floor(p);
   vec2 local = fract(p);
   float nearest = 2.0;
   for (int y = -1; y <= 1; y++) {
     for (int x = -1; x <= 1; x++) {
       vec2 offset = vec2(float(x), float(y));
-      vec2 point = vec2(hash(cell + offset), hash(cell + offset + 19.73));
+      vec2 point = vec2(hash(cell + offset + seed), hash(cell + offset + 19.73 + seed));
       point = 0.5 + 0.42 * sin(u_time * (0.08 + 0.05 * point) + 6.2831 * point);
-      nearest = min(nearest, length(offset + point - local));
+      float radius = 0.48 + 1.45 * hash(cell + offset + vec2(31.7, 83.1) + seed);
+      nearest = min(nearest, length(offset + point - local) / radius);
     }
   }
   return nearest;
@@ -88,11 +99,11 @@ float cellular(vec2 p) {
 
 void main() {
   vec2 uv = v_uv;
-  vec4 center = texture(u_state, uv);
-  vec4 leftState = texture(u_state, clamp(uv - vec2(u_texel.x,0),0.0,1.0));
-  vec4 rightState = texture(u_state, clamp(uv + vec2(u_texel.x,0),0.0,1.0));
-  vec4 bottomState = texture(u_state, clamp(uv - vec2(0,u_texel.y),0.0,1.0));
-  vec4 topState = texture(u_state, clamp(uv + vec2(0,u_texel.y),0.0,1.0));
+  vec4 center = sampleSphere(uv);
+  vec4 leftState = sampleSphere(uv - vec2(u_texel.x,0));
+  vec4 rightState = sampleSphere(uv + vec2(u_texel.x,0));
+  vec4 bottomState = sampleSphere(uv - vec2(0,u_texel.y));
+  vec4 topState = sampleSphere(uv + vec2(0,u_texel.y));
 
   float e = 0.009;
   float nx = turbulence(uv + vec2(e, 0.0)) - turbulence(uv - vec2(e, 0.0));
@@ -117,26 +128,27 @@ void main() {
   velocity -= scalarGradient * (1.6 * u_convection);
   velocity.y += (center.g - 0.5) * 0.11 * u_convection;
   velocity.y -= u_gravity * (0.045 + 0.11 * center.r * center.r);
+  velocity.x /= max(0.34, sin(3.1416 * uv.y));
 
   vec2 d = uv - u_pointer;
   float influence = exp(-dot(d, d) * 54.0) * u_pointerDown;
   velocity += vec2(-d.y, d.x) * influence * 7.5;
 
-  vec2 source = clamp(uv - velocity * u_dt, u_texel, 1.0 - u_texel);
-  vec4 state = texture(u_state, source);
+  vec2 source = sphereUv(uv - velocity * u_dt);
+  vec4 state = sampleSphere(source);
   float h = state.r;
   float scalar = state.g;
   float blackFilm = state.b;
 
-  float hL = texture(u_state, clamp(source - vec2(u_texel.x,0),0.0,1.0)).r;
-  float hR = texture(u_state, clamp(source + vec2(u_texel.x,0),0.0,1.0)).r;
-  float hB = texture(u_state, clamp(source - vec2(0,u_texel.y),0.0,1.0)).r;
-  float hT = texture(u_state, clamp(source + vec2(0,u_texel.y),0.0,1.0)).r;
+  float hL = sampleSphere(source - vec2(u_texel.x,0)).r;
+  float hR = sampleSphere(source + vec2(u_texel.x,0)).r;
+  float hB = sampleSphere(source - vec2(0,u_texel.y)).r;
+  float hT = sampleSphere(source + vec2(0,u_texel.y)).r;
   float lapH = hL + hR + hB + hT - 4.0 * h;
-  float sL = texture(u_state, clamp(source - vec2(u_texel.x,0),0.0,1.0)).g;
-  float sR = texture(u_state, clamp(source + vec2(u_texel.x,0),0.0,1.0)).g;
-  float sB = texture(u_state, clamp(source - vec2(0,u_texel.y),0.0,1.0)).g;
-  float sT = texture(u_state, clamp(source + vec2(0,u_texel.y),0.0,1.0)).g;
+  float sL = sampleSphere(source - vec2(u_texel.x,0)).g;
+  float sR = sampleSphere(source + vec2(u_texel.x,0)).g;
+  float sB = sampleSphere(source - vec2(0,u_texel.y)).g;
+  float sT = sampleSphere(source + vec2(0,u_texel.y)).g;
   float lapScalar = sL + sR + sB + sT - 4.0 * scalar;
 
   // Capillary leveling, nonlinear gravitational drainage, and lower meniscus.
@@ -151,11 +163,16 @@ void main() {
   scalar += (heatSource - scalar) * u_dt * 0.035;
 
   // Ultra-thin common-black-film islands nucleate in drained upper regions.
-  vec2 microUv = uv * vec2(13.0, 15.0) + vec2(turbulence(uv) * 0.42, -u_time * 0.035);
-  float cell = 1.0 - smoothstep(0.075, 0.22, cellular(microUv));
+  vec2 microWarp = vec2(turbulence(uv) * 0.34, -u_time * 0.028);
+  float largeIslands = 1.0 - smoothstep(0.075, 0.24, cellularVar(uv * vec2(7.0, 9.0) + microWarp, 3.1));
+  float mediumIslands = 1.0 - smoothstep(0.07, 0.22, cellularVar(uv * vec2(14.0, 16.0) - microWarp * 0.7, 11.7));
+  float smallIslands = 1.0 - smoothstep(0.065, 0.20, cellularVar(uv * vec2(27.0, 30.0) + microWarp * 1.4, 29.4));
+  float cell = max(largeIslands, max(mediumIslands * 0.92, smallIslands * 0.82));
   float thinEnough = 1.0 - smoothstep(0.46, 0.62, h);
   float upperFilm = smoothstep(0.34, 0.92, uv.y);
-  float targetBlack = cell * thinEnough * upperFilm * u_microFilm;
+  float islandDensity = smoothstep(0.0, 3.0, u_microFilm);
+  float islandPresence = smoothstep(0.92 - islandDensity * 0.62, 1.0, cell);
+  float targetBlack = islandPresence * thinEnough * upperFilm;
   blackFilm += (targetBlack - blackFilm) * u_dt * mix(0.18, 0.78, targetBlack);
   blackFilm = clamp(blackFilm, 0.0, 1.0);
   h -= blackFilm * u_dt * 0.025;
@@ -174,10 +191,13 @@ uniform float u_time;
 uniform float u_thickness;
 uniform float u_variation;
 uniform float u_ior;
-uniform float u_lightAngle;
 uniform float u_saturation;
 
 float hash(vec2 p) { return fract(sin(dot(p, vec2(41.31, 289.97))) * 9173.21); }
+
+vec4 sphereState(vec2 uv) {
+  return texture(u_state, vec2(fract(uv.x), clamp(uv.y, 0.0, 1.0)));
+}
 
 float filmReflectance(float lambda, float thickness, float cosTheta, float interfaceR) {
   float beta = 6.2831853 * u_ior * thickness * cosTheta / lambda;
@@ -197,7 +217,7 @@ vec3 spectrum(float thickness, float cosTheta, float interfaceR) {
   color += filmReflectance(600.0, thickness, cosTheta, interfaceR) * vec3(1.00, 0.48, 0.00) * 0.98;
   color += filmReflectance(640.0, thickness, cosTheta, interfaceR) * vec3(1.00, 0.08, 0.01) * 0.91;
   color += filmReflectance(680.0, thickness, cosTheta, interfaceR) * vec3(0.72, 0.00, 0.02) * 0.72;
-  return color * 0.28;
+  return color * 0.42;
 }
 
 void main() {
@@ -215,8 +235,7 @@ void main() {
   backdrop += (grain - 0.5) * 0.004;
 
   if (r2 > 1.0) {
-    float halo = exp(-abs(sqrt(r2) - 1.0) * 30.0) * 0.06;
-    outColor = vec4(backdrop + halo * vec3(0.18, 0.44, 0.68), 1.0);
+    outColor = vec4(backdrop, 1.0);
     return;
   }
 
@@ -227,13 +246,16 @@ void main() {
   float sinInternal2 = max(0.0, 1.0 - cosView * cosView) / (u_ior * u_ior);
   float cosInternal = sqrt(max(0.025, 1.0 - sinInternal2));
 
-  vec2 bubbleUv = q / (2.0 * radius) + 0.5;
-  vec2 stateTexel = vec2(1.0 / 320.0);
-  vec4 state = texture(u_state, clamp(bubbleUv, 0.0, 1.0));
-  float blackL = texture(u_state, clamp(bubbleUv - vec2(stateTexel.x,0),0.0,1.0)).b;
-  float blackR = texture(u_state, clamp(bubbleUv + vec2(stateTexel.x,0),0.0,1.0)).b;
-  float blackB = texture(u_state, clamp(bubbleUv - vec2(0,stateTexel.y),0.0,1.0)).b;
-  float blackT = texture(u_state, clamp(bubbleUv + vec2(0,stateTexel.y),0.0,1.0)).b;
+  vec2 bubbleUv = vec2(
+    fract(atan(normal.x, normal.z) / 6.2831853 + 0.5),
+    asin(clamp(normal.y, -1.0, 1.0)) / 3.14159265 + 0.5
+  );
+  vec2 stateTexel = vec2(1.0 / 256.0);
+  vec4 state = sphereState(bubbleUv);
+  float blackL = sphereState(bubbleUv - vec2(stateTexel.x,0)).b;
+  float blackR = sphereState(bubbleUv + vec2(stateTexel.x,0)).b;
+  float blackB = sphereState(bubbleUv - vec2(0,stateTexel.y)).b;
+  float blackT = sphereState(bubbleUv + vec2(0,stateTexel.y)).b;
   float blackGradient = length(vec2(blackR - blackL, blackT - blackB));
   float blackFilm = smoothstep(0.12, 0.72, state.b);
 
@@ -247,21 +269,27 @@ void main() {
   float luminance = dot(spectral, vec3(0.2126, 0.7152, 0.0722));
   spectral = mix(vec3(luminance), spectral, u_saturation);
 
-  float angle = radians(u_lightAngle);
-  vec3 lightDir = normalize(vec3(sin(angle), 0.42, cos(angle)));
-  vec3 halfDir = normalize(lightDir + viewDir);
-  float spec = pow(max(dot(normal, halfDir), 0.0), 210.0);
-  float broadSpec = pow(max(dot(normal, halfDir), 0.0), 30.0);
-  float studioStrip = pow(max(0.0, 1.0 - abs(normal.x + 0.58) * 2.8), 12.0) * smoothstep(-0.4, 0.7, normal.y);
+  vec3 keyDir = normalize(vec3(-0.46, 0.58, 0.72));
+  vec3 fillDir = normalize(vec3(0.58, -0.18, 0.79));
+  vec3 keyHalf = normalize(keyDir + viewDir);
+  vec3 fillHalf = normalize(fillDir + viewDir);
+  float keySpec = pow(max(dot(normal, keyHalf), 0.0), 170.0);
+  float fillSpec = pow(max(dot(normal, fillHalf), 0.0), 105.0);
+  float broadSpec = pow(max(dot(normal, keyHalf), 0.0), 22.0);
+  float diffuse = max(dot(normal, keyDir), 0.0) * 0.62 + max(dot(normal, fillDir), 0.0) * 0.38;
+  float studioStrip = pow(max(0.0, 1.0 - abs(normal.x + 0.57) * 2.7), 10.0) * smoothstep(-0.55, 0.8, normal.y);
+  float lowerStrip = pow(max(0.0, 1.0 - abs(normal.y + 0.52) * 3.4), 12.0) * smoothstep(-0.1, 0.9, normal.x);
 
   float edge = smoothstep(0.72, 1.0, sqrt(r2));
-  vec3 transmitted = backdrop * (0.82 + 0.12 * z);
-  transmitted += vec3(0.010, 0.014, 0.018) * state.g;
-  vec3 film = spectral * (0.78 + edge * 1.45);
-  film += broadSpec * vec3(0.045,0.055,0.065);
-  film += spec * vec3(1.10, 1.06, 0.98);
-  film += studioStrip * vec3(0.10, 0.12, 0.13) * (0.35 + edge);
-  film *= 0.82 + 0.18 * z;
+  vec3 transmitted = backdrop * (0.88 + 0.08 * z);
+  transmitted += vec3(0.025, 0.032, 0.042) * (0.32 + diffuse) * (0.65 + state.g * 0.35);
+  vec3 film = spectral * (1.25 + edge * 2.15);
+  film += broadSpec * vec3(0.10,0.115,0.13);
+  film += keySpec * vec3(1.45, 1.40, 1.28);
+  film += fillSpec * vec3(0.55, 0.67, 0.82);
+  film += studioStrip * vec3(0.24, 0.28, 0.31) * (0.45 + edge);
+  film += lowerStrip * vec3(0.10, 0.15, 0.22) * (0.35 + edge);
+  film *= 0.90 + 0.10 * z;
   film *= mix(1.0, 0.08, blackFilm);
   vec3 color = transmitted + film;
 
@@ -344,7 +372,7 @@ export default function Home() {
         gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
       }
 
-      const simSize = 320;
+      const simSize = 256;
       const textures = [gl.createTexture()!, gl.createTexture()!];
       const frames = [gl.createFramebuffer()!, gl.createFramebuffer()!];
       const seed = new Uint8Array(simSize * simSize * 4);
@@ -359,7 +387,7 @@ export default function Home() {
         gl.bindTexture(gl.TEXTURE_2D, texture);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, simSize, simSize, 0, gl.RGBA, gl.UNSIGNED_BYTE, seed);
         gl.bindFramebuffer(gl.FRAMEBUFFER, frames[index]);
@@ -388,19 +416,17 @@ export default function Home() {
       const render = (now: number) => {
         resize();
         const p = paramsRef.current;
-        const elapsed = Math.min(0.033, (now - last) / 1000) * p.speed;
+        const frameElapsed = Math.min(0.033, (now - last) / 1000);
         last = now;
         if (!pausedRef.current) {
-          simTime += elapsed;
+          const acceleratedElapsed = frameElapsed * p.speed;
+          const substeps = Math.max(1, Math.ceil(acceleratedElapsed / 0.04));
+          const stepDt = acceleratedElapsed / substeps;
           gl.useProgram(simProgram);
-          gl.bindFramebuffer(gl.FRAMEBUFFER, frames[1-read]);
           gl.viewport(0, 0, simSize, simSize);
           gl.activeTexture(gl.TEXTURE0);
-          gl.bindTexture(gl.TEXTURE_2D, textures[read]);
           gl.uniform1i(uniform(simProgram, "u_state"), 0);
           gl.uniform2f(uniform(simProgram, "u_texel"), 1/simSize, 1/simSize);
-          gl.uniform1f(uniform(simProgram, "u_time"), simTime);
-          gl.uniform1f(uniform(simProgram, "u_dt"), elapsed);
           gl.uniform1f(uniform(simProgram, "u_flow"), p.flow);
           gl.uniform1f(uniform(simProgram, "u_gravity"), p.drainage);
           gl.uniform1f(uniform(simProgram, "u_tension"), p.tension);
@@ -408,8 +434,15 @@ export default function Home() {
           gl.uniform1f(uniform(simProgram, "u_microFilm"), p.microFilm);
           gl.uniform2f(uniform(simProgram, "u_pointer"), pointerRef.current.x, pointerRef.current.y);
           gl.uniform1f(uniform(simProgram, "u_pointerDown"), pointerRef.current.down);
-          gl.drawArrays(gl.TRIANGLES, 0, 6);
-          read = 1-read;
+          for (let step = 0; step < substeps; step++) {
+            simTime += stepDt;
+            gl.bindFramebuffer(gl.FRAMEBUFFER, frames[1-read]);
+            gl.bindTexture(gl.TEXTURE_2D, textures[read]);
+            gl.uniform1f(uniform(simProgram, "u_time"), simTime);
+            gl.uniform1f(uniform(simProgram, "u_dt"), stepDt);
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+            read = 1-read;
+          }
         }
 
         gl.useProgram(drawProgram);
@@ -423,7 +456,6 @@ export default function Home() {
         gl.uniform1f(uniform(drawProgram, "u_thickness"), p.thickness);
         gl.uniform1f(uniform(drawProgram, "u_variation"), p.variation);
         gl.uniform1f(uniform(drawProgram, "u_ior"), p.refractiveIndex);
-        gl.uniform1f(uniform(drawProgram, "u_lightAngle"), p.lightAngle);
         gl.uniform1f(uniform(drawProgram, "u_saturation"), p.saturation);
         gl.drawArrays(gl.TRIANGLES, 0, 6);
         animation = requestAnimationFrame(render);
@@ -438,17 +470,31 @@ export default function Home() {
 
   const pointer = (event: React.PointerEvent<HTMLCanvasElement>, down?: number) => {
     const rect = event.currentTarget.getBoundingClientRect();
+    const screenU = (event.clientX - rect.left) / rect.width;
+    const screenV = 1 - (event.clientY - rect.top) / rect.height;
+    const aspect = rect.width / rect.height;
+    const qx = (screenU - 0.5) * aspect;
+    const qy = screenV - 0.5;
+    const radius = Math.min(0.425 * aspect, 0.455);
+    const radial = (qx * qx + qy * qy) / (radius * radius);
+    if (radial > 1) {
+      pointerRef.current = { ...pointerRef.current, down: down === 0 ? 0 : pointerRef.current.down };
+      return;
+    }
+    const nx = qx / radius;
+    const ny = qy / radius;
+    const nz = Math.sqrt(Math.max(0, 1 - radial));
     pointerRef.current = {
-      x: (event.clientX - rect.left) / rect.width,
-      y: 1 - (event.clientY - rect.top) / rect.height,
+      x: Math.atan2(nx, nz) / (Math.PI * 2) + 0.5,
+      y: Math.asin(Math.max(-1, Math.min(1, ny))) / Math.PI + 0.5,
       down: down ?? pointerRef.current.down,
     };
   };
 
   const preset = (name: "fresh" | "draining" | "black") => {
     const next = name === "fresh" ? { ...DEFAULTS, thickness: 740, variation: 410, drainage: 0.18, microFilm: 0.18 }
-      : name === "draining" ? { ...DEFAULTS, thickness: 350, variation: 330, drainage: 0.82, flow: 0.82, convection: 0.9, microFilm: 0.9 }
-      : { ...DEFAULTS, thickness: 68, variation: 52, drainage: 0.2, flow: 0.3, convection: 0.42, microFilm: 1.0, saturation: 0.92 };
+      : name === "draining" ? { ...DEFAULTS, thickness: 350, variation: 330, drainage: 0.82, flow: 1.65, convection: 1.8, microFilm: 1.5 }
+      : { ...DEFAULTS, thickness: 68, variation: 52, drainage: 0.2, flow: 0.55, convection: 0.72, microFilm: 2.7, saturation: 0.92 };
     setParams(next);
     resetRef.current();
   };
@@ -468,14 +514,6 @@ export default function Home() {
             onPointerMove={(e) => pointer(e)}
             onPointerUp={(e) => pointer(e, 0)} onPointerCancel={(e) => pointer(e, 0)} />
           {!available && <div className="webgl-fallback">This simulation needs a browser with WebGL 2 enabled.</div>}
-          <div className="stage-copy">
-            <p className="eyebrow">THIN-FILM INTERFERENCE / MARANGONI CONVECTION</p>
-            <h1>Light, flowing<br />over a surface.</h1>
-            <p className="intro">A living soap-film model: buoyant convection rolls couple to surfactant flow, gravity drainage and capillary leveling—then a spectral solver turns the moving thickness into reflected color.</p>
-          </div>
-          <div className="drag-hint"><span>↗</span> DRAG THE FILM TO STIR</div>
-          <div className="readout thickness-readout"><span>MEAN FILM</span><strong>{params.thickness.toFixed(0)} nm</strong></div>
-          <div className="readout order-readout"><span>OPTICAL PATH</span><strong>{(2 * params.refractiveIndex * params.thickness).toFixed(0)} nm</strong></div>
         </div>
 
         <aside className="panel">
@@ -490,17 +528,16 @@ export default function Home() {
             <Range label="Mean thickness" value={params.thickness} min={20} max={1200} step={1} unit=" nm" onChange={v => set("thickness", v)} />
             <Range label="Thickness variation" value={params.variation} min={0} max={600} step={1} unit=" nm" onChange={v => set("variation", v)} />
             <Range label="Refractive index" value={params.refractiveIndex} min={1.05} max={1.8} step={0.01} onChange={v => set("refractiveIndex", v)} />
-            <Range label="Light angle" value={params.lightAngle} min={-70} max={70} step={1} unit="°" onChange={v => set("lightAngle", v)} />
             <Range label="Color response" value={params.saturation} min={0} max={1.6} step={0.01} onChange={v => set("saturation", v)} />
           </div>
           <div className="control-group">
             <h3>Fluid model</h3>
             <Range label="Gravity drainage" value={params.drainage} min={0} max={1.2} step={0.01} onChange={v => set("drainage", v)} />
             <Range label="Surface tension" value={params.tension} min={0} max={1} step={0.01} onChange={v => set("tension", v)} />
-            <Range label="Turbulent flow" value={params.flow} min={0} max={1.4} step={0.01} onChange={v => set("flow", v)} />
-            <Range label="Thermal convection" value={params.convection} min={0} max={1.4} step={0.01} onChange={v => set("convection", v)} />
-            <Range label="Black-film islands" value={params.microFilm} min={0} max={1} step={0.01} onChange={v => set("microFilm", v)} />
-            <Range label="Time scale" value={params.speed} min={0.1} max={2.5} step={0.1} unit="×" onChange={v => set("speed", v)} />
+            <Range label="Turbulent flow" value={params.flow} min={0} max={4} step={0.01} onChange={v => set("flow", v)} />
+            <Range label="Thermal convection" value={params.convection} min={0} max={4} step={0.01} onChange={v => set("convection", v)} />
+            <Range label="Black-film islands" value={params.microFilm} min={0} max={3} step={0.01} onChange={v => set("microFilm", v)} />
+            <Range label="Time scale" value={params.speed} min={0.1} max={12} step={0.1} unit="×" onChange={v => set("speed", v)} />
           </div>
           <button className="reset-button" onClick={() => { setParams(DEFAULTS); resetRef.current(); }}>Reset experiment <span>↺</span></button>
           <details className="formula-card">
