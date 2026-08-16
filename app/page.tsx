@@ -1,7 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { BubbleCanvas, type BubbleCanvasHandle } from "./bubble/BubbleCanvas";
+import {
+  BubbleCanvas,
+  type BubbleCanvasHandle,
+  type InteractionMode,
+} from "./bubble/BubbleCanvas";
 import { ControlPanel } from "./bubble/ControlPanel";
 import {
   DEFAULT_PARAMETERS,
@@ -15,6 +19,9 @@ export default function Home() {
   const [parameters, setParameters] = useState(DEFAULT_PARAMETERS);
   const [paused, setPaused] = useState(false);
   const [available, setAvailable] = useState(true);
+  const [interactionMode, setInteractionMode] = useState<InteractionMode>(
+    "perturb",
+  );
   const resetAfterStateUpdate = useCallback(() => {
     requestAnimationFrame(() => bubbleRef.current?.reset());
   }, []);
@@ -77,8 +84,29 @@ export default function Home() {
             ref={bubbleRef}
             parameters={parameters}
             paused={paused}
+            interactionMode={interactionMode}
             onAvailabilityChange={setAvailable}
           />
+          <div
+            className="interaction-toggle"
+            role="group"
+            aria-label="Bubble drag behavior"
+          >
+            <button
+              type="button"
+              aria-pressed={interactionMode === "perturb"}
+              onClick={() => setInteractionMode("perturb")}
+            >
+              Perturb
+            </button>
+            <button
+              type="button"
+              aria-pressed={interactionMode === "rotate"}
+              onClick={() => setInteractionMode("rotate")}
+            >
+              Rotate
+            </button>
+          </div>
           {!available && (
             <div className="webgl-fallback">
               This simulation needs a browser with WebGL 2 enabled.
