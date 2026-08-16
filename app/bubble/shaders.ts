@@ -531,6 +531,7 @@ out vec4 outColor;
 
 uniform float u_ior;
 uniform float u_saturation;
+uniform vec2 u_cameraOrbit;
 
 const float TWO_PI = 6.28318530718;
 const float THICKNESS_RANGE_NM = ${(FILM_THICKNESS_RANGE_MICRONS * 1000).toFixed(4)};
@@ -568,6 +569,48 @@ vec3 spectrum(float thickness, float cosIncident) {
   return color * 0.42;
 }
 
+vec3 rotateX(vec3 direction, float angle) {
+  float c = cos(angle);
+  float s = sin(angle);
+  return vec3(
+    direction.x,
+    c * direction.y - s * direction.z,
+    s * direction.y + c * direction.z
+  );
+}
+
+vec3 rotateY(vec3 direction, float angle) {
+  float c = cos(angle);
+  float s = sin(angle);
+  return vec3(
+    c * direction.x + s * direction.z,
+    direction.y,
+    -s * direction.x + c * direction.z
+  );
+}
+
+/*
+ * World-fixed illumination under a camera orbit.
+ *
+ * The vertex shader applies this same inverse yaw/pitch transform to surface
+ * normals. Applying it to world-space light directions expresses the lights
+ * in view space without moving them with the camera. This is the directional
+ * part of the standard world -> view change of basis; directions do not need
+ * translation. The specular lobe then moves across the sphere as the camera
+ * orbits, while the simulated film remains attached to the spherical surface.
+ *
+ * At the mirror direction, the view and light incidence angles are equal, so
+ * the already evaluated Airy thin-film spectrum is reused to tint the source
+ * reflection. Reuse avoids another wavelength quadrature per light and keeps
+ * the fragment cost essentially unchanged for the 60 fps target.
+ */
+vec3 worldToViewDirection(vec3 worldDirection) {
+  return rotateX(
+    rotateY(worldDirection, -u_cameraOrbit.x),
+    -u_cameraOrbit.y
+  );
+}
+
 void main() {
   vec3 normal = normalize(v_viewNormal);
   float cosView = max(normal.z, 0.001);
@@ -576,18 +619,28 @@ void main() {
   float luminance = dot(spectral, vec3(0.2126, 0.7152, 0.0722));
   spectral = mix(vec3(luminance), spectral, u_saturation);
 
-  vec3 keyDir = normalize(vec3(-0.46, 0.58, 0.72));
-  vec3 fillDir = normalize(vec3(0.58, -0.18, 0.79));
+  vec3 keyWorldDir = normalize(vec3(-0.46, 0.58, 0.72));
+  vec3 fillWorldDir = normalize(vec3(0.58, -0.18, 0.79));
+  vec3 keyDir = normalize(worldToViewDirection(keyWorldDir));
+  vec3 fillDir = normalize(worldToViewDirection(fillWorldDir));
   vec3 viewDir = vec3(0.0, 0.0, 1.0);
-  float keySpec = pow(max(dot(normalize(keyDir + viewDir), normal), 0.0), 180.0);
-  float fillSpec = pow(max(dot(normalize(fillDir + viewDir), normal), 0.0), 120.0);
+  float keyIllumination = smoothstep(
+    0.0, 0.08, max(dot(normal, keyDir), 0.0)
+  );
+  float fillIllumination = smoothstep(
+    0.0, 0.08, max(dot(normal, fillDir), 0.0)
+  );
+  float keySpec = keyIllumination
+    * pow(max(dot(normalize(keyDir + viewDir), normal), 0.0), 180.0);
+  float fillSpec = fillIllumination
+    * pow(max(dot(normalize(fillDir + viewDir), normal), 0.0), 120.0);
   float edge = pow(clamp(1.0 - cosView, 0.0, 1.0), 1.5);
   vec3 backdrop = vec3(0.010, 0.014, 0.021);
   vec3 transmitted = backdrop + vec3(0.030, 0.038, 0.050)
     * (0.7 + 0.3 * cosView);
   vec3 film = spectral * (1.3 + edge * 2.1);
-  film += keySpec * vec3(1.20, 1.17, 1.10);
-  film += fillSpec * vec3(0.42, 0.51, 0.66);
+  film += keySpec * (vec3(0.96, 0.93, 0.87) + spectral * 0.72);
+  film += fillSpec * (vec3(0.32, 0.39, 0.52) + spectral * 0.40);
   film += smoothstep(0.72, 0.99, edge) * vec3(0.12, 0.17, 0.24);
   outColor = vec4(pow(max(transmitted + film, 0.0), vec3(0.84)), 1.0);
 }`;
