@@ -532,6 +532,8 @@ out vec4 outColor;
 uniform float u_ior;
 uniform float u_saturation;
 uniform vec2 u_cameraOrbit;
+uniform int u_colorGrade;
+uniform float u_contrast;
 
 const float TWO_PI = 6.28318530718;
 const float THICKNESS_RANGE_NM = ${(FILM_THICKNESS_RANGE_MICRONS * 1000).toFixed(4)};
@@ -611,6 +613,56 @@ vec3 worldToViewDirection(vec3 worldDirection) {
   );
 }
 
+/*
+ * Display-referred looks, applied only after the physical Airy reflectance and
+ * world-space lighting have been evaluated. They cannot feed energy back into
+ * the thin-film solver. "Filmic" uses the inexpensive ACES fitted curve from
+ * Narkowicz (2015); "Neutral" uses the global Reinhard (2002) luminance
+ * operator; "Vivid" combines the ACES shoulder with a restrained chroma lift.
+ * The default branch remains bit-for-bit equivalent at contrast 1.0.
+ *
+ * Contrast is a luminance-domain power curve around photographic middle gray
+ * (18%). Scaling RGB by the luminance ratio preserves the interference hue and
+ * avoids independent-channel clipping before the selected tone curve.
+ */
+vec3 applyContrast(vec3 color, float contrast) {
+  if (abs(contrast - 1.0) < 0.0001) {
+    return color;
+  }
+  float luminance = max(dot(color, vec3(0.2126, 0.7152, 0.0722)), 0.00001);
+  float adjusted = 0.18 * pow(luminance / 0.18, contrast);
+  return color * (adjusted / luminance);
+}
+
+vec3 acesFitted(vec3 color) {
+  return clamp(
+    color * (2.51 * color + 0.03)
+      / (color * (2.43 * color + 0.59) + 0.14),
+    0.0,
+    1.0
+  );
+}
+
+vec3 applyColorGrade(vec3 color) {
+  if (u_colorGrade == 1) {
+    return acesFitted(color);
+  }
+  if (u_colorGrade == 2) {
+    float luminance = max(
+      dot(color, vec3(0.2126, 0.7152, 0.0722)),
+      0.00001
+    );
+    float mapped = luminance / (1.0 + luminance);
+    return color * (mapped / luminance);
+  }
+  if (u_colorGrade == 3) {
+    vec3 filmic = acesFitted(color);
+    float luminance = dot(filmic, vec3(0.2126, 0.7152, 0.0722));
+    return clamp(mix(vec3(luminance), filmic, 1.18), 0.0, 1.0);
+  }
+  return color;
+}
+
 void main() {
   vec3 normal = normalize(v_viewNormal);
   float cosView = max(normal.z, 0.001);
@@ -642,7 +694,11 @@ void main() {
   film += keySpec * (vec3(0.96, 0.93, 0.87) + spectral * 0.72);
   film += fillSpec * (vec3(0.32, 0.39, 0.52) + spectral * 0.40);
   film += smoothstep(0.72, 0.99, edge) * vec3(0.12, 0.17, 0.24);
-  outColor = vec4(pow(max(transmitted + film, 0.0), vec3(0.84)), 1.0);
+  vec3 litColor = max(transmitted + film, 0.0);
+  vec3 gradedColor = applyColorGrade(
+    applyContrast(litColor, u_contrast)
+  );
+  outColor = vec4(pow(max(gradedColor, 0.0), vec3(0.84)), 1.0);
 }`;
 
 export const backgroundShader = `#version 300 es

@@ -1,6 +1,10 @@
 "use client";
 
-import type { PresetName, SimulationParameters } from "./model";
+import type {
+  ColorGrade,
+  PresetName,
+  SimulationParameters,
+} from "./model";
 
 type RangeProps = {
   label: string;
@@ -36,7 +40,11 @@ function Range({ label, value, min, max, step, unit = "", onChange }: RangeProps
 type ControlPanelProps = {
   parameters: SimulationParameters;
   paused: boolean;
+  colorGrade: ColorGrade;
+  contrast: number;
   onParameterChange: (key: keyof SimulationParameters, value: number) => void;
+  onColorGradeChange: (grade: ColorGrade) => void;
+  onContrastChange: (contrast: number) => void;
   onPauseToggle: () => void;
   onPreset: (name: PresetName) => void;
   onReset: () => void;
@@ -45,7 +53,11 @@ type ControlPanelProps = {
 export function ControlPanel({
   parameters,
   paused,
+  colorGrade,
+  contrast,
   onParameterChange,
+  onColorGradeChange,
+  onContrastChange,
   onPauseToggle,
   onPreset,
   onReset,
@@ -96,6 +108,37 @@ export function ControlPanel({
         <summary>What is being calculated? <span>+</span></summary>
         <p>The GPU evolves physical thickness, tangential momentum, insoluble surfactant, and temperature on one closed icosahedral manifold. Cotangent operators, conservative dual-edge fluxes, and spherical parallel transport avoid an atlas, seam, or pole. Lubrication capillarity, SI gravity, Langmuir Marangoni stress, evaporation, and DLVO pressure use published forms; unresolved cross-film and air coupling use an explicitly documented partially-mobile-interface closure. At 1×, one model second is exactly one wall-clock second.</p>
       </details>
+      <div className="display-controls">
+        <h3>Display grade</h3>
+        <div
+          className="grade-toggle"
+          role="radiogroup"
+          aria-label="Lighting color grade"
+        >
+          {(["default", "filmic", "neutral", "vivid"] as const).map(
+            (grade) => (
+              <button
+                key={grade}
+                type="button"
+                role="radio"
+                aria-checked={colorGrade === grade}
+                onClick={() => onColorGradeChange(grade)}
+              >
+                {grade}
+              </button>
+            ),
+          )}
+        </div>
+        <Range
+          label="Contrast"
+          value={contrast}
+          min={0.5}
+          max={1.8}
+          step={0.01}
+          unit="×"
+          onChange={onContrastChange}
+        />
+      </div>
     </aside>
   );
 }

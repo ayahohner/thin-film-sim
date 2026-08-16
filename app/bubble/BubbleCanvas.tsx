@@ -7,7 +7,12 @@ import {
   useRef,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import type { CameraOrbit, SimulationParameters, Vector3 } from "./model";
+import type {
+  CameraOrbit,
+  ColorGrade,
+  SimulationParameters,
+  Vector3,
+} from "./model";
 import { screenNormalToWorldDirection } from "./model";
 import { createIcosphere, initializeIcosphereState } from "./icosphere";
 import {
@@ -46,6 +51,8 @@ type BubbleCanvasProps = {
   parameters: SimulationParameters;
   paused: boolean;
   interactionMode: InteractionMode;
+  colorGrade: ColorGrade;
+  contrast: number;
   onAvailabilityChange: (available: boolean) => void;
 };
 
@@ -72,7 +79,15 @@ const SIMULATION_UNIFORMS = [
 
 const BUBBLE_UNIFORMS = [
   "u_state0", "u_resolution", "u_cameraOrbit", "u_ior", "u_saturation",
+  "u_colorGrade", "u_contrast",
 ] as const;
+
+const COLOR_GRADE_INDEX: Record<ColorGrade, number> = {
+  default: 0,
+  filmic: 1,
+  neutral: 2,
+  vivid: 3,
+};
 
 const GEOMETRY_UNIFORMS = [
   "u_state0", "u_neighbors", "u_stateSize", "u_vertexCount",
@@ -83,11 +98,15 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
     parameters,
     paused,
     interactionMode,
+    colorGrade,
+    contrast,
     onAvailabilityChange,
   }, ref) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const parametersRef = useRef(parameters);
     const pausedRef = useRef(paused);
+    const colorGradeRef = useRef(colorGrade);
+    const contrastRef = useRef(contrast);
     const resetSimulationRef = useRef<() => void>(() => {});
     const captureRef = useRef<() => string | null>(() => null);
     const diagnosticsRef = useRef<() => DynamicsReport | null>(() => null);
@@ -101,6 +120,8 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
 
     useEffect(() => { parametersRef.current = parameters; }, [parameters]);
     useEffect(() => { pausedRef.current = paused; }, [paused]);
+    useEffect(() => { colorGradeRef.current = colorGrade; }, [colorGrade]);
+    useEffect(() => { contrastRef.current = contrast; }, [contrast]);
     useEffect(() => {
       resetSimulationRef.current();
     }, [parameters.thickness, parameters.variation]);
@@ -430,6 +451,11 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
           );
           gl.uniform1f(bubbleUniforms.u_ior, current.refractiveIndex);
           gl.uniform1f(bubbleUniforms.u_saturation, current.saturation);
+          gl.uniform1i(
+            bubbleUniforms.u_colorGrade,
+            COLOR_GRADE_INDEX[colorGradeRef.current],
+          );
+          gl.uniform1f(bubbleUniforms.u_contrast, contrastRef.current);
           gl.drawElements(gl.TRIANGLES, mesh.indices.length, gl.UNSIGNED_INT, 0);
 
           if (measureGpu) gpuTimer.end();
