@@ -1,3 +1,21 @@
+import {
+  BUBBLE_RADIUS_METERS,
+  DEBYE_LENGTH_METERS,
+  DOUBLE_LAYER_PRESSURE_PASCALS,
+  DRAINAGE_SPEED_AT_STANDARD_GRAVITY,
+  FILM_THICKNESS_RANGE_MICRONS,
+  HAMAKER_CONSTANT_JOULES,
+  INTERFACIAL_RELAXATION_RATE,
+  MIN_FILM_THICKNESS_MICRONS,
+  SURFACTANT_MARANGONI_RESPONSE,
+  TEMPERATURE_RANGE,
+  THERMAL_MARANGONI_RESPONSE,
+  THERMAL_DIFFUSIVITY,
+  THICKNESS_BUOYANCY_RESPONSE,
+  VELOCITY_RANGE,
+  WATER_DENSITY,
+} from "./physics";
+
 export const fullscreenVertexShader = `#version 300 es
 in vec2 a_position;
 out vec2 v_uv;
@@ -7,10 +25,85 @@ void main() {
   gl_Position = vec4(a_position, 0.0, 1.0);
 }`;
 
+/*
+ * Mixed fourth-order solve, pass 1 of 2.
+ *
+ * The lubrication pressure contains a Laplace-Beltrami thickness term, making
+ * capillary drainage fourth order. Computing Delta(h) once avoids the previous
+ * nested six-by-six stencil in every simulation pass. This follows the mixed
+ * second-order treatment recommended for thin-film PDEs by Lalli & Giusti,
+ * JFM 986 A7 (2024), section 2.7: https://doi.org/10.1017/jfm.2024.335
+ */
+export const geometryShader = `#version 300 es
+precision highp float;
+precision highp int;
+layout(location = 0) out vec4 outGeometry;
+
+uniform sampler2D u_state0;
+uniform sampler2D u_neighbors;
+uniform ivec2 u_stateSize;
+uniform int u_vertexCount;
+
+ivec2 indexCoord(int index) {
+  return ivec2(index % u_stateSize.x, index / u_stateSize.x);
+}
+
+vec4 neighborAt(int index, int slot) {
+  ivec2 coordinate = indexCoord(index);
+  coordinate.y += slot * u_stateSize.y;
+  return texelFetch(u_neighbors, coordinate, 0);
+}
+
+void main() {
+  ivec2 coordinate = ivec2(gl_FragCoord.xy);
+  int index = coordinate.y * u_stateSize.x + coordinate.x;
+  if (index >= u_vertexCount) {
+    outGeometry = vec4(0.0);
+    return;
+  }
+  float center = texelFetch(u_state0, coordinate, 0).r;
+  float laplacian = 0.0;
+  for (int slot = 0; slot < 6; slot += 1) {
+    vec4 neighbor = neighborAt(index, slot);
+    if (neighbor.r >= 0.0) {
+      int neighborIndex = int(neighbor.r + 0.5);
+      float neighborHeight = texelFetch(
+        u_state0, indexCoord(neighborIndex), 0
+      ).r;
+      laplacian += neighbor.g * (neighborHeight - center);
+    }
+  }
+  outGeometry = vec4(laplacian, 0.0, 0.0, 1.0);
+}`;
+
+/*
+ * Intrinsic reduced-order thin-film solver
+ * ----------------------------------------
+ * This is a vertex-centred finite-volume/DEC-inspired discretisation on one
+ * closed simplicial sphere. It evolves conservative thickness, tangential
+ * momentum, insoluble surfactant, and temperature. It is not a full 3-D DNS:
+ * cross-film shear, surface rheology and air coupling are collapsed into the
+ * explicitly named interfacial-mobility closure below.
+ *
+ * Research-backed terms:
+ * - mass/evaporation, lubrication pressure, gravity flux, Langmuir surfactant
+ *   transport and DLVO pressure: Lalli & Giusti, JFM 986 A7 (2024), equations
+ *   2.28, 2.52-2.63 and C1: https://doi.org/10.1017/jfm.2024.335
+ * - covariant vector viscosity and curvature correction on a sphere:
+ *   Nitschke, Reuther & Voigt (2017): https://arxiv.org/abs/1611.04392
+ * - symmetric conservative edge operators and parallel transport:
+ *   Jagad et al. (2020): https://arxiv.org/abs/2010.15520
+ * - thermally driven bubble convection as the physical forcing regime:
+ *   Seychelles et al., PRL 100, 144501 (2008):
+ *   https://doi.org/10.1103/PhysRevLett.100.144501
+ *
+ * Numerical-only term: the local Rusanov flux is an entropy stabiliser for
+ * transport. Its diffusion is proportional to the actual edge speed and is
+ * exactly zero at rest; it is not presented as film physics.
+ */
 export const simulationShader = `#version 300 es
 precision highp float;
 precision highp int;
-in vec2 v_uv;
 layout(location = 0) out vec4 outState0;
 layout(location = 1) out vec4 outState1;
 
@@ -18,9 +111,11 @@ uniform sampler2D u_state0;
 uniform sampler2D u_state1;
 uniform sampler2D u_positions;
 uniform sampler2D u_neighbors;
+uniform sampler2D u_geometry;
 uniform ivec2 u_stateSize;
 uniform int u_vertexCount;
 uniform float u_dt;
+uniform float u_time;
 uniform float u_gravity;
 uniform float u_surfaceTension;
 uniform float u_viscosity;
@@ -32,9 +127,23 @@ uniform vec3 u_pointerDirection;
 uniform vec3 u_pointerVelocity;
 uniform float u_pointerDown;
 
-const float VELOCITY_RANGE = 0.34;
-const float TEMPERATURE_RANGE = 4.0;
-const float BUBBLE_RADIUS = 0.022;
+const float VELOCITY_RANGE = ${VELOCITY_RANGE.toFixed(8)};
+const float TEMPERATURE_RANGE = ${TEMPERATURE_RANGE.toFixed(8)};
+const float THICKNESS_RANGE_UM = ${FILM_THICKNESS_RANGE_MICRONS.toFixed(8)};
+const float MIN_THICKNESS_UM = ${MIN_FILM_THICKNESS_MICRONS.toFixed(8)};
+const float BUBBLE_RADIUS = ${BUBBLE_RADIUS_METERS.toFixed(8)};
+const float WATER_DENSITY = ${WATER_DENSITY.toFixed(4)};
+const float DRAINAGE_SPEED_AT_G = ${DRAINAGE_SPEED_AT_STANDARD_GRAVITY.toFixed(8)};
+const float INTERFACIAL_RELAXATION = ${INTERFACIAL_RELAXATION_RATE.toFixed(8)};
+const float THICKNESS_BUOYANCY_RESPONSE = ${THICKNESS_BUOYANCY_RESPONSE.toFixed(8)};
+const float SURFACTANT_MARANGONI_RESPONSE = ${SURFACTANT_MARANGONI_RESPONSE.toFixed(8)};
+const float THERMAL_MARANGONI_RESPONSE = ${THERMAL_MARANGONI_RESPONSE.toFixed(8)};
+const float THERMAL_DIFFUSIVITY = ${THERMAL_DIFFUSIVITY.toExponential(8)};
+const float HAMAKER_CONSTANT = ${HAMAKER_CONSTANT_JOULES.toExponential(8)};
+const float DOUBLE_LAYER_PRESSURE = ${DOUBLE_LAYER_PRESSURE_PASCALS.toFixed(8)};
+const float DEBYE_LENGTH = ${DEBYE_LENGTH_METERS.toExponential(8)};
+const float WATER_HEAT_CAPACITY = 4180.0;
+const float WATER_LATENT_HEAT = 2.40e6;
 
 ivec2 indexCoord(int index) {
   return ivec2(index % u_stateSize.x, index / u_stateSize.x);
@@ -43,6 +152,9 @@ ivec2 indexCoord(int index) {
 vec4 state0At(int index) { return texelFetch(u_state0, indexCoord(index), 0); }
 vec4 state1At(int index) { return texelFetch(u_state1, indexCoord(index), 0); }
 vec3 positionAt(int index) { return texelFetch(u_positions, indexCoord(index), 0).xyz; }
+float laplaceHeightAt(int index) {
+  return texelFetch(u_geometry, indexCoord(index), 0).r;
+}
 
 vec4 neighborAt(int index, int slot) {
   ivec2 coordinate = indexCoord(index);
@@ -55,7 +167,8 @@ vec3 decodeVelocity(vec4 state) {
 }
 
 vec3 parallelTransport(vec3 vector, vec3 from, vec3 to) {
-  return vector - (dot(vector, to) / max(1.0 + dot(from, to), 0.0001)) * (from + to);
+  return vector - (dot(vector, to) / max(1.0 + dot(from, to), 0.0001))
+    * (from + to);
 }
 
 vec3 clampMagnitude(vec3 vector, float limit) {
@@ -63,23 +176,19 @@ vec3 clampMagnitude(vec3 vector, float limit) {
   return magnitude > limit ? vector * (limit / magnitude) : vector;
 }
 
-void tangentFrame(vec3 normal, out vec3 tangentA, out vec3 tangentB) {
-  vec3 reference = abs(normal.z) < 0.88 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-  tangentA = normalize(cross(reference, normal));
-  tangentB = normalize(cross(normal, tangentA));
+/* DLVO pressure for the full physical film thickness, in pascals. */
+float disjoiningPressure(float thicknessMeters) {
+  float h = max(thicknessMeters, MIN_THICKNESS_UM * 1.0e-6);
+  return -HAMAKER_CONSTANT / (6.0 * 3.14159265359 * h * h * h)
+    + DOUBLE_LAYER_PRESSURE * exp(-h / DEBYE_LENGTH);
 }
 
-float laplaceHeightAt(int index) {
-  float center = state0At(index).r;
-  float laplacian = 0.0;
-  for (int slot = 0; slot < 6; slot += 1) {
-    vec4 neighbor = neighborAt(index, slot);
-    if (neighbor.r >= 0.0) {
-      int neighborIndex = int(neighbor.r + 0.5);
-      laplacian += neighbor.g * (state0At(neighborIndex).r - center);
-    }
-  }
-  return laplacian;
+void tangentFrame(vec3 normal, out vec3 tangentA, out vec3 tangentB) {
+  vec3 reference = abs(normal.z) < 0.88
+    ? vec3(0.0, 0.0, 1.0)
+    : vec3(0.0, 1.0, 0.0);
+  tangentA = normalize(cross(reference, normal));
+  tangentB = normalize(cross(normal, tangentA));
 }
 
 vec2 solveGradient(float rhsX, float rhsY, float mxx, float mxy, float myy) {
@@ -94,7 +203,7 @@ void main() {
   ivec2 coordinate = ivec2(gl_FragCoord.xy);
   int index = coordinate.y * u_stateSize.x + coordinate.x;
   if (index >= u_vertexCount) {
-    outState0 = vec4(0.55, 0.5, 0.5, 0.5);
+    outState0 = vec4(0.2, 0.5, 0.5, 0.5);
     outState1 = vec4(0.5, 0.5, 0.0, 1.0);
     return;
   }
@@ -105,8 +214,16 @@ void main() {
   float height = center0.r;
   float surfactant = center1.r;
   float temperature = (center1.g * 2.0 - 1.0) * TEMPERATURE_RANGE;
+  float thicknessScaleMeters = THICKNESS_RANGE_UM * 1.0e-6;
+  float physicalThickness = max(
+    height * thicknessScaleMeters,
+    MIN_THICKNESS_UM * 1.0e-6
+  );
+  float viscosityPascalSeconds = max(u_viscosity * 1.0e-3, 1.0e-6);
+  float centerDisjoiningPressure = disjoiningPressure(physicalThickness);
   vec3 velocity = decodeVelocity(center0);
   velocity -= normal * dot(velocity, normal);
+  float laplaceHeight = laplaceHeightAt(index);
 
   vec3 tangentA;
   vec3 tangentB;
@@ -120,14 +237,17 @@ void main() {
   float rhsSurfactantY = 0.0;
   float rhsTemperatureX = 0.0;
   float rhsTemperatureY = 0.0;
-  float laplaceHeight = 0.0;
-  float laplaceSurfactant = 0.0;
+  float laplaceSurfactantPotential = 0.0;
   float laplaceTemperature = 0.0;
+  float biLaplacianHeight = 0.0;
   vec3 laplaceVelocity = vec3(0.0);
+  float neighborHeightSum = 0.0;
+  float neighborCount = 0.0;
   float heightRate = 0.0;
   float surfactantRate = 0.0;
   float temperatureRate = 0.0;
   vec3 momentumRate = vec3(0.0);
+  vec3 gravityTangent = vec3(0.0, -1.0, 0.0) + normal * normal.y;
 
   for (int slot = 0; slot < 6; slot += 1) {
     vec4 neighbor = neighborAt(index, slot);
@@ -138,7 +258,16 @@ void main() {
     vec4 neighbor1 = state1At(neighborIndex);
     float neighborHeight = neighbor0.r;
     float neighborSurfactant = neighbor1.r;
-    float neighborTemperature = (neighbor1.g * 2.0 - 1.0) * TEMPERATURE_RANGE;
+    float neighborTemperature = (neighbor1.g * 2.0 - 1.0)
+      * TEMPERATURE_RANGE;
+    float neighborLaplace = laplaceHeightAt(neighborIndex);
+    float neighborPhysicalThickness = max(
+      neighborHeight * thicknessScaleMeters,
+      MIN_THICKNESS_UM * 1.0e-6
+    );
+    float neighborDisjoiningPressure = disjoiningPressure(
+      neighborPhysicalThickness
+    );
     vec3 neighborVelocity = parallelTransport(
       decodeVelocity(neighbor0), neighborNormal, normal
     );
@@ -154,28 +283,66 @@ void main() {
     myy += leastSquaresWeight * y * y;
     rhsHeightX += leastSquaresWeight * x * (neighborHeight - height);
     rhsHeightY += leastSquaresWeight * y * (neighborHeight - height);
-    rhsSurfactantX += leastSquaresWeight * x * (neighborSurfactant - surfactant);
-    rhsSurfactantY += leastSquaresWeight * y * (neighborSurfactant - surfactant);
-    rhsTemperatureX += leastSquaresWeight * x * (neighborTemperature - temperature);
-    rhsTemperatureY += leastSquaresWeight * y * (neighborTemperature - temperature);
+    rhsSurfactantX += leastSquaresWeight * x
+      * (neighborSurfactant - surfactant);
+    rhsSurfactantY += leastSquaresWeight * y
+      * (neighborSurfactant - surfactant);
+    rhsTemperatureX += leastSquaresWeight * x
+      * (neighborTemperature - temperature);
+    rhsTemperatureY += leastSquaresWeight * y
+      * (neighborTemperature - temperature);
 
-    laplaceHeight += neighbor.g * (neighborHeight - height);
-    laplaceSurfactant += neighbor.g * (neighborSurfactant - surfactant);
+    float centerSurfactantPotential = -log(max(1.0 - surfactant, 0.001));
+    float neighborSurfactantPotential = -log(
+      max(1.0 - neighborSurfactant, 0.001)
+    );
+    laplaceSurfactantPotential += neighbor.g
+      * (neighborSurfactantPotential - centerSurfactantPotential);
     laplaceTemperature += neighbor.g * (neighborTemperature - temperature);
+    biLaplacianHeight += neighbor.g * (neighborLaplace - laplaceHeight);
     laplaceVelocity += neighbor.g * (neighborVelocity - velocity);
+    neighborHeightSum += neighborHeight;
+    neighborCount += 1.0;
 
     vec3 edgeVelocity = (velocity + neighborVelocity) * 0.5;
     float normalFlow = dot(edgeVelocity, edgeDirection);
+    float entropySpeed = min(abs(normalFlow), 0.030);
     float fluxWeight = neighbor.b;
-    heightRate -= fluxWeight * normalFlow * (height + neighborHeight) * 0.5;
-    surfactantRate -= fluxWeight * normalFlow
-      * (surfactant + neighborSurfactant) * 0.5;
-    temperatureRate -= fluxWeight * normalFlow
-      * (temperature + neighborTemperature) * 0.5;
+    float heightFlux = normalFlow * (height + neighborHeight) * 0.5
+      - 0.5 * entropySpeed * (neighborHeight - height);
+
+    /*
+     * Depth-averaged lubrication fluxes in physical SI units. The gravity term
+     * is rho*g*h^3/(3*mu); the DLVO term is h^3 grad(Pi)/(3*mu).
+     * Division by H_range*R converts m^2/s to encoded angular flux, while the
+     * symmetric dual-edge divergence supplies the remaining 1/radian.
+     */
+    float faceThickness = 0.5
+      * (physicalThickness + neighborPhysicalThickness);
+    float cubicMobility = faceThickness * faceThickness * faceThickness
+      / (3.0 * viscosityPascalSeconds);
+    float gravityFilmFlux = cubicMobility * WATER_DENSITY * u_gravity
+      / (thicknessScaleMeters * BUBBLE_RADIUS)
+      * dot(gravityTangent, edgeDirection);
+    float disjoiningFilmFlux = cubicMobility
+      / (thicknessScaleMeters * BUBBLE_RADIUS * BUBBLE_RADIUS)
+      * (neighborDisjoiningPressure - centerDisjoiningPressure) / distance;
+    heightFlux += gravityFilmFlux + disjoiningFilmFlux;
+    float surfactantFlux = normalFlow
+      * (surfactant + neighborSurfactant) * 0.5
+      - 0.5 * entropySpeed * (neighborSurfactant - surfactant);
+    float temperatureFlux = normalFlow
+      * (temperature + neighborTemperature) * 0.5
+      - 0.5 * entropySpeed * (neighborTemperature - temperature);
     vec3 centerMomentum = height * velocity;
     vec3 neighborMomentum = neighborHeight * neighborVelocity;
-    momentumRate -= fluxWeight * normalFlow
-      * (centerMomentum + neighborMomentum) * 0.5;
+    vec3 momentumFlux = normalFlow
+      * (centerMomentum + neighborMomentum) * 0.5
+      - 0.5 * entropySpeed * (neighborMomentum - centerMomentum);
+    heightRate -= fluxWeight * heightFlux;
+    surfactantRate -= fluxWeight * surfactantFlux;
+    temperatureRate -= fluxWeight * temperatureFlux;
+    momentumRate -= fluxWeight * momentumFlux;
   }
 
   vec2 gradHeightComponents = solveGradient(
@@ -194,69 +361,109 @@ void main() {
   vec3 gradTemperature = tangentA * gradTemperatureComponents.x
     + tangentB * gradTemperatureComponents.y;
 
-  float rhsLaplaceX = 0.0;
-  float rhsLaplaceY = 0.0;
-  for (int slot = 0; slot < 6; slot += 1) {
-    vec4 neighbor = neighborAt(index, slot);
-    if (neighbor.r < 0.0) continue;
-    int neighborIndex = int(neighbor.r + 0.5);
-    vec3 neighborNormal = normalize(positionAt(neighborIndex));
-    float cosine = clamp(dot(normal, neighborNormal), -1.0, 1.0);
-    float distance = max(acos(cosine), 0.0001);
-    vec3 edgeDirection = normalize(neighborNormal - normal * cosine);
-    float x = distance * dot(edgeDirection, tangentA);
-    float y = distance * dot(edgeDirection, tangentB);
-    float weight = 1.0 / (distance * distance);
-    float difference = laplaceHeightAt(neighborIndex) - laplaceHeight;
-    rhsLaplaceX += weight * x * difference;
-    rhsLaplaceY += weight * y * difference;
-  }
-  vec2 gradLaplaceComponents = solveGradient(
-    rhsLaplaceX, rhsLaplaceY, mxx, mxy, myy
+  float localMeanHeight = neighborHeightSum / max(neighborCount, 1.0);
+  float relativeThickness = (height - localMeanHeight)
+    / max(localMeanHeight, 0.002);
+  float gravityRatio = u_gravity / 9.81;
+  /*
+   * Partially-mobile interface closure.
+   *
+   * A depth-resolved free film does not have a universal no-slip terminal law.
+   * We therefore relax toward a measured-order (sub-mm/s physical) drainage
+   * velocity instead of pretending that an arbitrary coefficient is g. The UI
+   * gravity remains an SI input and scales this target linearly. Thickness
+   * contrast supplies the observed two-dimensional buoyancy of thin patches
+   * (Adami & Caps 2014, https://doi.org/10.1209/0295-5075/106/46001).
+   */
+  float mobilityContrast = clamp(
+    1.0 + THICKNESS_BUOYANCY_RESPONSE * relativeThickness, -0.35, 2.4
   );
-  vec3 gradLaplaceHeight = tangentA * gradLaplaceComponents.x
-    + tangentB * gradLaplaceComponents.y;
+  vec3 targetDrainageVelocity = gravityTangent
+    * DRAINAGE_SPEED_AT_G * gravityRatio * mobilityContrast;
+  vec3 acceleration = INTERFACIAL_RELAXATION
+    * (targetDrainageVelocity - velocity);
 
-  float gravityScale = 0.052 * u_gravity / 9.81;
-  vec3 gravityTangent = vec3(0.0, -1.0, 0.0) + normal * normal.y;
-  vec3 acceleration = gravityScale * gravityTangent;
-  acceleration -= 0.085 * (
-    (u_marangoni / 18.0) * gradSurfactant
-    + (0.15 / 18.0) * gradTemperature
-  );
-  acceleration += 0.00115 * (u_surfaceTension / 32.0)
-    * height * height * gradLaplaceHeight;
+  /* Langmuir equation of state: grad(sigma) is proportional to
+     -grad(Gamma)/(1-Gamma), rather than an arbitrary coloured-noise force. */
+  acceleration -= SURFACTANT_MARANGONI_RESPONSE * (u_marangoni / 18.0)
+    * gradSurfactant / max(1.0 - surfactant, 0.08);
+  acceleration -= THERMAL_MARANGONI_RESPONSE * gradTemperature;
+
   float angularViscosity = (u_viscosity * 1.0e-6)
     / (BUBBLE_RADIUS * BUBBLE_RADIUS);
   acceleration += angularViscosity * (laplaceVelocity + 2.0 * velocity);
-  acceleration -= velocity * 0.018;
 
-  float pointerInfluence = exp(-(1.0 - dot(normal, u_pointerDirection)) * 48.0)
-    * u_pointerDown;
-  acceleration += parallelTransport(u_pointerVelocity, u_pointerDirection, normal)
-    * pointerInfluence * 1.8;
-  acceleration = clampMagnitude(acceleration - normal * dot(acceleration, normal), 0.72);
+  float pointerInfluence = exp(
+    -(1.0 - dot(normal, u_pointerDirection)) * 48.0
+  ) * u_pointerDown;
+  acceleration += parallelTransport(
+    u_pointerVelocity, u_pointerDirection, normal
+  ) * pointerInfluence * 1.8;
+  acceleration = clampMagnitude(
+    acceleration - normal * dot(acceleration, normal), 0.45
+  );
 
-  float diffusion = u_diffusion * 1.0e-12
+  float surfaceDiffusion = u_diffusion * 1.0e-12
     / (BUBBLE_RADIUS * BUBBLE_RADIUS);
-  surfactantRate += diffusion * laplaceSurfactant;
-  temperatureRate += 0.00029 * laplaceTemperature;
-  float ambientShape = 0.55 * normal.y + 0.22 * normal.x * normal.z
-    + 0.13 * (normal.x * normal.x - normal.z * normal.z);
-  float targetTemperature = u_thermalGradient * ambientShape
-    - 0.22 * (0.55 - height);
-  temperatureRate += 0.16 * (targetTemperature - temperature);
-  temperatureRate -= 0.032 * u_evaporation * (1.0 + 0.3 * (0.55 - height));
+  /* Thermodynamically consistent Langmuir surface diffusion,
+     J_D = -D grad(Gamma)/(1-Gamma), Lalli & Giusti eq. 2.56. */
+  surfactantRate += surfaceDiffusion * laplaceSurfactantPotential;
+  temperatureRate += THERMAL_DIFFUSIVITY
+    / (BUBBLE_RADIUS * BUBBLE_RADIUS) * laplaceTemperature;
 
-  heightRate -= u_evaporation / 600.0;
-  float newHeight = clamp(height + u_dt * heightRate, 0.008, 0.96);
+  /*
+   * Air-side thermal boundary closure.
+   * The browser cannot resolve 3-D air convection at 60 fps. These two
+   * lowest-order, slowly varying ambient modes prescribe heat/mass-transfer
+   * coefficients only; they do not add momentum or paint thickness. The film
+   * responds through the energy equation, evaporation, and Marangoni stress.
+   */
+  float slowModeA = sin(
+    4.3 * dot(normal, normalize(vec3(0.72, 0.28, 0.63)))
+    + 0.075 * u_time
+  );
+  float slowModeB = sin(
+    6.1 * dot(normal, normalize(vec3(-0.26, 0.91, 0.32)))
+    - 0.052 * u_time + 1.4
+  );
+  float ambientShape = 0.44 * (1.0 - abs(normal.y))
+    - 0.26 * normal.y + 0.15 * normal.x * normal.z
+    + 0.12 * slowModeA + 0.08 * slowModeB;
+  float targetTemperature = u_thermalGradient * ambientShape;
+  float evaporationFlux = u_evaporation * (
+    1.0 + 0.22 * normal.y + 0.12 * slowModeA + 0.08 * slowModeB
+  );
+  float evaporationMetersPerSecond = evaporationFlux * 1.0e-9;
+  float evaporativeCoolingRate = WATER_LATENT_HEAT
+    * evaporationMetersPerSecond
+    / (max(physicalThickness, 40.0e-9) * WATER_HEAT_CAPACITY);
+  temperatureRate += 0.70 * (targetTemperature - temperature);
+  temperatureRate -= evaporativeCoolingRate;
+
+  /* Lubrication capillarity: -gamma*h^3*Delta^2(h)/(3*mu*R^4). */
+  float capillaryMobility = (
+    u_surfaceTension * 1.0e-3
+    * physicalThickness * physicalThickness * physicalThickness
+  ) / (
+    3.0 * viscosityPascalSeconds
+    * pow(BUBBLE_RADIUS, 4.0)
+  );
+  heightRate -= capillaryMobility * biLaplacianHeight;
+  heightRate -= evaporationFlux * 1.0e-3 / THICKNESS_RANGE_UM;
+
+  float minimumHeight = MIN_THICKNESS_UM / THICKNESS_RANGE_UM;
+  float newHeight = clamp(
+    height + u_dt * heightRate,
+    minimumHeight,
+    1.0
+  );
   vec3 newMomentum = height * velocity
     + u_dt * (momentumRate + height * acceleration);
-  vec3 newVelocity = newMomentum / max(newHeight, 0.025);
+  vec3 newVelocity = newMomentum / max(newHeight, minimumHeight);
   newVelocity -= normal * dot(newVelocity, normal);
   newVelocity = clampMagnitude(newVelocity, VELOCITY_RANGE);
   float newSurfactant = clamp(
-    surfactant + u_dt * surfactantRate, 0.22, 0.78
+    surfactant + u_dt * surfactantRate, 0.15, 0.85
   );
   float newTemperature = clamp(
     temperature + u_dt * temperatureRate,
@@ -285,7 +492,6 @@ uniform vec2 u_resolution;
 uniform vec2 u_cameraOrbit;
 out float v_height;
 out vec3 v_viewNormal;
-out vec3 v_worldNormal;
 
 vec3 rotateX(vec3 p, float angle) {
   float c = cos(angle);
@@ -315,22 +521,19 @@ void main() {
   );
   v_height = texture(u_state0, a_stateUv).r;
   v_viewNormal = viewNormal;
-  v_worldNormal = worldNormal;
 }`;
 
 export const bubbleFragmentShader = `#version 300 es
 precision highp float;
 in float v_height;
 in vec3 v_viewNormal;
-in vec3 v_worldNormal;
 out vec4 outColor;
 
-uniform float u_thickness;
-uniform float u_variation;
 uniform float u_ior;
 uniform float u_saturation;
 
 const float TWO_PI = 6.28318530718;
+const float THICKNESS_RANGE_NM = ${(FILM_THICKNESS_RANGE_MICRONS * 1000).toFixed(4)};
 
 float airyReflectance(float interfaceR, float beta) {
   float sinBeta2 = pow(sin(beta), 2.0);
@@ -368,8 +571,7 @@ vec3 spectrum(float thickness, float cosIncident) {
 void main() {
   vec3 normal = normalize(v_viewNormal);
   float cosView = max(normal.z, 0.001);
-  float relativeHeight = v_height - 0.55;
-  float thickness = max(5.0, u_thickness + relativeHeight * u_variation * 3.0);
+  float thickness = max(4.0, v_height * THICKNESS_RANGE_NM);
   vec3 spectral = spectrum(thickness, cosView);
   float luminance = dot(spectral, vec3(0.2126, 0.7152, 0.0722));
   spectral = mix(vec3(luminance), spectral, u_saturation);
@@ -381,7 +583,8 @@ void main() {
   float fillSpec = pow(max(dot(normalize(fillDir + viewDir), normal), 0.0), 120.0);
   float edge = pow(clamp(1.0 - cosView, 0.0, 1.0), 1.5);
   vec3 backdrop = vec3(0.010, 0.014, 0.021);
-  vec3 transmitted = backdrop + vec3(0.030, 0.038, 0.050) * (0.7 + 0.3 * cosView);
+  vec3 transmitted = backdrop + vec3(0.030, 0.038, 0.050)
+    * (0.7 + 0.3 * cosView);
   vec3 film = spectral * (1.3 + edge * 2.1);
   film += keySpec * vec3(1.20, 1.17, 1.10);
   film += fillSpec * vec3(0.42, 0.51, 0.66);
@@ -400,7 +603,10 @@ float hash(vec2 p) {
 
 void main() {
   vec2 q = v_uv - 0.5;
-  float glow = exp(-dot(q - vec2(-0.18, 0.16), q - vec2(-0.18, 0.16)) * 4.2);
+  float glow = exp(-dot(
+    q - vec2(-0.18, 0.16),
+    q - vec2(-0.18, 0.16)
+  ) * 4.2);
   vec3 color = vec3(0.010, 0.014, 0.021)
     + vec3(0.012, 0.023, 0.037) * glow;
   color += (hash(gl_FragCoord.xy) - 0.5) * 0.003;

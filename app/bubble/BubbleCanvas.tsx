@@ -9,14 +9,23 @@ import {
 } from "react";
 import type { CameraOrbit, SimulationParameters, Vector3 } from "./model";
 import { screenNormalToWorldDirection } from "./model";
-import { createIcosphere } from "./icosphere";
+import { createIcosphere, initializeIcosphereState } from "./icosphere";
 import {
+  geometryShader,
   backgroundShader,
   bubbleFragmentShader,
   bubbleVertexShader,
   fullscreenVertexShader,
   simulationShader,
 } from "./shaders";
+import { FixedStepClock } from "./clock";
+import {
+  captureTimesFromUrl,
+  diagnosticsEnabled,
+  GpuTimer,
+  readDynamicsSample,
+  type DynamicsReport,
+} from "./diagnostics";
 import {
   createProgram,
   createTexture,
@@ -25,7 +34,11 @@ import {
   uniformLocations,
 } from "./webgl";
 
-export type BubbleCanvasHandle = { reset: () => void };
+export type BubbleCanvasHandle = {
+  reset: () => void;
+  capture: () => string | null;
+  diagnostics: () => DynamicsReport | null;
+};
 
 type BubbleCanvasProps = {
   parameters: SimulationParameters;
@@ -50,12 +63,16 @@ const SIMULATION_UNIFORMS = [
   "u_state0", "u_state1", "u_positions", "u_neighbors", "u_stateSize",
   "u_vertexCount", "u_dt", "u_gravity", "u_surfaceTension", "u_viscosity",
   "u_marangoni", "u_diffusion", "u_evaporation", "u_thermalGradient",
-  "u_pointerDirection", "u_pointerVelocity", "u_pointerDown",
+  "u_pointerDirection", "u_pointerVelocity", "u_pointerDown", "u_geometry",
+  "u_time",
 ] as const;
 
 const BUBBLE_UNIFORMS = [
-  "u_state0", "u_resolution", "u_cameraOrbit", "u_thickness", "u_variation",
-  "u_ior", "u_saturation",
+  "u_state0", "u_resolution", "u_cameraOrbit", "u_ior", "u_saturation",
+] as const;
+
+const GEOMETRY_UNIFORMS = [
+  "u_state0", "u_neighbors", "u_stateSize", "u_vertexCount",
 ] as const;
 
 export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
@@ -64,6 +81,8 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
     const parametersRef = useRef(parameters);
     const pausedRef = useRef(paused);
     const resetSimulationRef = useRef<() => void>(() => {});
+    const captureRef = useRef<() => string | null>(() => null);
+    const diagnosticsRef = useRef<() => DynamicsReport | null>(() => null);
     const cameraOrbitRef = useRef<CameraOrbit>({ yaw: 0, pitch: 0 });
     const filmPointerRef = useRef<FilmPointer>({
       direction: [0, 0, 1], velocity: [0, 0, 0], down: 0, lastTime: 0,
@@ -74,12 +93,25 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
 
     useEffect(() => { parametersRef.current = parameters; }, [parameters]);
     useEffect(() => { pausedRef.current = paused; }, [paused]);
-    useImperativeHandle(ref, () => ({ reset: () => resetSimulationRef.current() }), []);
+    useEffect(() => {
+      resetSimulationRef.current();
+    }, [parameters.thickness, parameters.variation]);
+    useImperativeHandle(ref, () => ({
+      reset: () => resetSimulationRef.current(),
+      capture: () => captureRef.current(),
+      diagnostics: () => diagnosticsRef.current(),
+    }), []);
 
     useEffect(() => {
       const canvas = canvasRef.current;
       if (!canvas) return;
-      const gl = canvas.getContext("webgl2", { antialias: true, alpha: false });
+      const collectDiagnostics = diagnosticsEnabled();
+      const gl = canvas.getContext("webgl2", {
+        antialias: true,
+        alpha: false,
+        preserveDrawingBuffer: collectDiagnostics,
+        powerPreference: "high-performance",
+      });
       if (!gl) {
         queueMicrotask(() => onAvailabilityChange(false));
         return;
@@ -87,9 +119,15 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
 
       let animation = 0;
       try {
+        const geometryProgram = createProgram(
+          gl, fullscreenVertexShader, geometryShader,
+        );
         const simulationProgram = createProgram(gl, fullscreenVertexShader, simulationShader);
         const backgroundProgram = createProgram(gl, fullscreenVertexShader, backgroundShader);
         const bubbleProgram = createProgram(gl, bubbleVertexShader, bubbleFragmentShader);
+        const geometryUniforms = uniformLocations(
+          gl, geometryProgram, GEOMETRY_UNIFORMS,
+        );
         const simulationUniforms = uniformLocations(gl, simulationProgram, SIMULATION_UNIFORMS);
         const bubbleUniforms = uniformLocations(gl, bubbleProgram, BUBBLE_UNIFORMS);
 
@@ -101,14 +139,23 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
         gl.bindVertexArray(fullscreenArray);
         gl.bindBuffer(gl.ARRAY_BUFFER, fullscreenBuffer);
         gl.bufferData(gl.ARRAY_BUFFER, FULLSCREEN_TRIANGLES, gl.STATIC_DRAW);
-        for (const program of [simulationProgram, backgroundProgram]) {
+        for (const program of [
+          geometryProgram, simulationProgram, backgroundProgram,
+        ]) {
           const location = gl.getAttribLocation(program, "a_position");
           gl.enableVertexAttribArray(location);
           gl.vertexAttribPointer(location, 2, gl.FLOAT, false, 0, 0);
         }
 
+        /*
+         * One subdivision step quadruples triangle count. Level 5 on phones is
+         * 10,242 vertices (4x the old grid); level 6 on desktop is 40,962.
+         * State is vertex-centred, so this raises physical resolution without
+         * changing the one-manifold topology or adding display-only tessellation.
+         */
         const mobile = window.innerWidth < 700;
-        const mesh = createIcosphere(mobile ? 4 : 5);
+        const mesh = createIcosphere(mobile ? 5 : 6);
+        initializeIcosphereState(mesh, parametersRef.current);
         const bubbleArray = gl.createVertexArray();
         const positionBuffer = gl.createBuffer();
         const stateUvBuffer = gl.createBuffer();
@@ -130,11 +177,20 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
         gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.indices, gl.STATIC_DRAW);
 
+        /*
+         * RGBA32F is required for conservative long-time transport. UNORM8 stored
+         * only 256 thickness/velocity levels and was the source of high-speed
+         * vibration and visible quantisation. No packed fallback silently changes
+         * the equations; unsupported devices receive the existing static fallback.
+         */
         const usesFloatState = Boolean(gl.getExtension("EXT_color_buffer_float"));
-        const stateInternalFormat = usesFloatState ? gl.RGBA16F : gl.RGBA8;
-        const stateType = usesFloatState ? gl.FLOAT : gl.UNSIGNED_BYTE;
-        const initialState0 = stateUploadData(mesh.initialState0, usesFloatState);
-        const initialState1 = stateUploadData(mesh.initialState1, usesFloatState);
+        if (!usesFloatState) {
+          throw new Error("The physical solver requires floating-point render targets");
+        }
+        const stateInternalFormat = gl.RGBA32F;
+        const stateType = gl.FLOAT;
+        let initialState0 = stateUploadData(mesh.initialState0, true);
+        let initialState1 = stateUploadData(mesh.initialState1, true);
         const positionTexture = createTexture(
           gl, mesh.textureWidth, mesh.textureHeight,
           gl.RGBA32F, gl.FLOAT, mesh.positionTexels,
@@ -142,6 +198,10 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
         const neighborTexture = createTexture(
           gl, mesh.textureWidth, mesh.textureHeight * 6,
           gl.RGBA32F, gl.FLOAT, mesh.neighborTexels,
+        );
+        const geometryTexture = createTexture(
+          gl, mesh.textureWidth, mesh.textureHeight,
+          gl.RGBA32F, gl.FLOAT, null,
         );
         const state0Textures = [0, 1].map(() => createTexture(
           gl, mesh.textureWidth, mesh.textureHeight,
@@ -152,7 +212,11 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
           stateInternalFormat, stateType, initialState1,
         ));
         const framebuffers = [gl.createFramebuffer(), gl.createFramebuffer()];
-        if (framebuffers.some((framebuffer) => !framebuffer)) {
+        const geometryFramebuffer = gl.createFramebuffer();
+        if (
+          framebuffers.some((framebuffer) => !framebuffer)
+          || !geometryFramebuffer
+        ) {
           throw new Error("Unable to allocate simulation framebuffer");
         }
         framebuffers.forEach((framebuffer, index) => {
@@ -168,9 +232,26 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
             throw new Error("Simulation framebuffer is incomplete");
           }
         });
+        gl.bindFramebuffer(gl.FRAMEBUFFER, geometryFramebuffer);
+        gl.framebufferTexture2D(
+          gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0,
+          gl.TEXTURE_2D, geometryTexture, 0,
+        );
+        gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+        if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+          throw new Error("Geometry framebuffer is incomplete");
+        }
 
         let readIndex = 0;
-        let timeDebt = 0;
+        const clock = new FixedStepClock();
+        const gpuTimer = new GpuTimer(gl);
+        const samples: DynamicsReport["samples"] = [];
+        const frames: DynamicsReport["frames"] = [];
+        const captureTimes = collectDiagnostics ? captureTimesFromUrl() : [];
+        let nextCapture = 0;
+        let nextSampleTime = 0;
+        let diagnosticsStartedAt = performance.now();
+        let recentFrameSeconds: number[] = [];
         const uploadState = (
           texture: WebGLTexture,
           data: Float32Array | Uint8Array,
@@ -183,11 +264,31 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
           );
         };
         resetSimulationRef.current = () => {
+          initializeIcosphereState(mesh, parametersRef.current);
+          initialState0 = stateUploadData(mesh.initialState0, true);
+          initialState1 = stateUploadData(mesh.initialState1, true);
           for (const texture of state0Textures) uploadState(texture, initialState0);
           for (const texture of state1Textures) uploadState(texture, initialState1);
           readIndex = 0;
-          timeDebt = 0;
+          clock.reset();
+          samples.length = 0;
+          frames.length = 0;
+          nextCapture = 0;
+          nextSampleTime = 0;
+          diagnosticsStartedAt = performance.now();
+          recentFrameSeconds = [];
         };
+        captureRef.current = () => (
+          collectDiagnostics ? canvas.toDataURL("image/png") : null
+        );
+        diagnosticsRef.current = () => collectDiagnostics ? {
+          generatedAt: new Date().toISOString(),
+          meshVertices: mesh.vertexCount,
+          meshTriangles: mesh.indices.length / 3,
+          parameters: { ...parametersRef.current },
+          samples: [...samples],
+          frames: [...frames],
+        } : null;
 
         const resize = () => {
           const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
@@ -200,10 +301,8 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
         };
 
         let lastFrame = performance.now();
-        const modelSecondsPerRealSecond = 2.25;
-        const maxSubsteps = mobile ? 10 : 14;
-        const targetStep = 1 / 75;
-        const maxStableStep = 1 / 30;
+        let frameCount = 0;
+        let droppedModelSeconds = 0;
 
         const bindTexture = (unit: number, texture: WebGLTexture) => {
           gl.activeTexture(gl.TEXTURE0 + unit);
@@ -213,23 +312,36 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
         const render = (now: number) => {
           resize();
           const current = parametersRef.current;
-          const frameElapsed = Math.min(0.05, Math.max(0, (now - lastFrame) / 1000));
+          const frameElapsed = Math.min(0.1, Math.max(0, (now - lastFrame) / 1000));
           lastFrame = now;
+          recentFrameSeconds.push(frameElapsed);
+          if (recentFrameSeconds.length > 120) recentFrameSeconds.shift();
+          const measureGpu = frameCount % 90 === 0;
+          if (measureGpu) gpuTimer.begin();
 
           if (!pausedRef.current) {
-            timeDebt += frameElapsed * current.speed * modelSecondsPerRealSecond;
-            const requestedSubsteps = Math.floor(timeDebt / targetStep);
-            const substeps = Math.min(maxSubsteps, requestedSubsteps);
-            const stepDuration = requestedSubsteps > maxSubsteps
-              ? Math.min(maxStableStep, timeDebt / maxSubsteps)
-              : targetStep;
-            gl.useProgram(simulationProgram);
+            const batch = clock.advance(frameElapsed, current.speed);
+            droppedModelSeconds = batch.droppedSeconds;
+            const stepStartTime = clock.simulatedTime - batch.simulatedSeconds;
             gl.bindVertexArray(fullscreenArray);
             gl.viewport(0, 0, mesh.textureWidth, mesh.textureHeight);
+            gl.useProgram(geometryProgram);
+            gl.uniform1i(geometryUniforms.u_state0, 0);
+            gl.uniform1i(geometryUniforms.u_neighbors, 3);
+            gl.uniform2i(
+              geometryUniforms.u_stateSize,
+              mesh.textureWidth,
+              mesh.textureHeight,
+            );
+            gl.uniform1i(geometryUniforms.u_vertexCount, mesh.vertexCount);
+            bindTexture(3, neighborTexture);
+
+            gl.useProgram(simulationProgram);
             gl.uniform1i(simulationUniforms.u_state0, 0);
             gl.uniform1i(simulationUniforms.u_state1, 1);
             gl.uniform1i(simulationUniforms.u_positions, 2);
             gl.uniform1i(simulationUniforms.u_neighbors, 3);
+            gl.uniform1i(simulationUniforms.u_geometry, 4);
             gl.uniform2i(
               simulationUniforms.u_stateSize,
               mesh.textureWidth,
@@ -254,17 +366,31 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
             gl.uniform1f(simulationUniforms.u_pointerDown, filmPointerRef.current.down);
             bindTexture(2, positionTexture);
             bindTexture(3, neighborTexture);
+            bindTexture(4, geometryTexture);
 
-            for (let step = 0; step < substeps; step += 1) {
+            /*
+             * Mixed fourth-order update: pass A computes Delta(h) once, pass B
+             * computes Delta^2(h) with one neighbor gather. The previous nested
+             * stencil repeated up to 36 state fetches per vertex per substep.
+             */
+            for (let step = 0; step < batch.steps; step += 1) {
+              gl.useProgram(geometryProgram);
+              gl.bindFramebuffer(gl.FRAMEBUFFER, geometryFramebuffer);
+              bindTexture(0, state0Textures[readIndex]);
+              gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+              gl.useProgram(simulationProgram);
               gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffers[1 - readIndex]);
               bindTexture(0, state0Textures[readIndex]);
               bindTexture(1, state1Textures[readIndex]);
-              gl.uniform1f(simulationUniforms.u_dt, stepDuration);
+              gl.uniform1f(simulationUniforms.u_dt, batch.stepSeconds);
+              gl.uniform1f(
+                simulationUniforms.u_time,
+                stepStartTime + (step + 1) * batch.stepSeconds,
+              );
               gl.drawArrays(gl.TRIANGLES, 0, 6);
               readIndex = 1 - readIndex;
             }
-            timeDebt = Math.max(0, timeDebt - stepDuration * substeps);
-            timeDebt = Math.min(timeDebt, maxStableStep * maxSubsteps);
             const pointerVelocity = filmPointerRef.current.velocity;
             filmPointerRef.current.velocity = [
               pointerVelocity[0] * 0.72,
@@ -294,11 +420,51 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
             cameraOrbitRef.current.yaw,
             cameraOrbitRef.current.pitch,
           );
-          gl.uniform1f(bubbleUniforms.u_thickness, current.thickness);
-          gl.uniform1f(bubbleUniforms.u_variation, current.variation);
           gl.uniform1f(bubbleUniforms.u_ior, current.refractiveIndex);
           gl.uniform1f(bubbleUniforms.u_saturation, current.saturation);
           gl.drawElements(gl.TRIANGLES, mesh.indices.length, gl.UNSIGNED_INT, 0);
+
+          if (measureGpu) gpuTimer.end();
+          const gpuMilliseconds = gpuTimer.poll();
+          frameCount += 1;
+          canvas.dataset.simulationSeconds = clock.simulatedTime.toFixed(3);
+
+          /* GPU readback and PNG encoding intentionally exist only in diagnostic
+             mode: both can stall the render pipeline and would invalidate FPS. */
+          if (collectDiagnostics) {
+            while (
+              nextCapture < captureTimes.length
+              && clock.simulatedTime >= captureTimes[nextCapture]
+            ) {
+              frames.push({
+                modelSeconds: captureTimes[nextCapture],
+                image: canvas.toDataURL("image/png"),
+              });
+              nextCapture += 1;
+            }
+
+            if (clock.simulatedTime >= nextSampleTime) {
+              const frameMean = recentFrameSeconds.reduce(
+                (sum, seconds) => sum + seconds, 0,
+              ) / Math.max(1, recentFrameSeconds.length);
+              samples.push(readDynamicsSample({
+                gl,
+                framebuffer: framebuffers[readIndex]!,
+                floatingPoint: usesFloatState,
+                width: mesh.textureWidth,
+                height: mesh.textureHeight,
+                vertexCount: mesh.vertexCount,
+                dualAreas: mesh.dualAreas,
+                modelSeconds: clock.simulatedTime,
+                wallSeconds: (now - diagnosticsStartedAt) / 1000,
+                fps: frameMean > 0 ? 1 / frameMean : 0,
+                gpuMilliseconds,
+                droppedSeconds: droppedModelSeconds,
+              }));
+              nextSampleTime = Math.floor(clock.simulatedTime) + 1;
+              gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            }
+          }
           animation = requestAnimationFrame(render);
         };
 
@@ -307,16 +473,21 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
         return () => {
           cancelAnimationFrame(animation);
           resetSimulationRef.current = () => {};
+          captureRef.current = () => null;
+          diagnosticsRef.current = () => null;
+          gpuTimer.dispose();
           for (const texture of [
-            positionTexture, neighborTexture,
+            positionTexture, neighborTexture, geometryTexture,
             ...state0Textures, ...state1Textures,
           ]) gl.deleteTexture(texture);
           for (const framebuffer of framebuffers) gl.deleteFramebuffer(framebuffer);
+          gl.deleteFramebuffer(geometryFramebuffer);
           for (const buffer of [
             fullscreenBuffer, positionBuffer, stateUvBuffer, indexBuffer,
           ]) gl.deleteBuffer(buffer);
           gl.deleteVertexArray(fullscreenArray);
           gl.deleteVertexArray(bubbleArray);
+          gl.deleteProgram(geometryProgram);
           gl.deleteProgram(simulationProgram);
           gl.deleteProgram(backgroundProgram);
           gl.deleteProgram(bubbleProgram);
