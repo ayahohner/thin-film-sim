@@ -40,9 +40,12 @@ export type BubbleCanvasHandle = {
   diagnostics: () => DynamicsReport | null;
 };
 
+export type InteractionMode = "perturb" | "rotate";
+
 type BubbleCanvasProps = {
   parameters: SimulationParameters;
   paused: boolean;
+  interactionMode: InteractionMode;
   onAvailabilityChange: (available: boolean) => void;
 };
 
@@ -76,7 +79,12 @@ const GEOMETRY_UNIFORMS = [
 ] as const;
 
 export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
-  function BubbleCanvas({ parameters, paused, onAvailabilityChange }, ref) {
+  function BubbleCanvas({
+    parameters,
+    paused,
+    interactionMode,
+    onAvailabilityChange,
+  }, ref) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const parametersRef = useRef(parameters);
     const pausedRef = useRef(paused);
@@ -554,13 +562,15 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
     };
 
     const pointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+      event.preventDefault();
       event.currentTarget.setPointerCapture(event.pointerId);
+      const rotates = event.shiftKey || interactionMode === "rotate";
       interactionRef.current = {
-        mode: event.shiftKey ? "orbit" : "film",
+        mode: rotates ? "orbit" : "film",
         lastClientX: event.clientX,
         lastClientY: event.clientY,
       };
-      if (event.shiftKey) {
+      if (rotates) {
         event.currentTarget.dataset.orbiting = "true";
         filmPointerRef.current.down = 0;
       } else {
@@ -569,6 +579,7 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
     };
 
     const pointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+      if (interactionRef.current.mode) event.preventDefault();
       const interaction = interactionRef.current;
       if (interaction.mode === "orbit") {
         const deltaX = event.clientX - interaction.lastClientX;
@@ -601,7 +612,10 @@ export const BubbleCanvas = forwardRef<BubbleCanvasHandle, BubbleCanvasProps>(
       <canvas
         ref={canvasRef}
         className="bubble-canvas"
-        aria-label="Animated soap bubble thin-film simulation; Shift-drag rotates the scene"
+        data-interaction-mode={interactionMode}
+        aria-label={`Animated soap bubble thin-film simulation; drag to ${
+          interactionMode === "rotate" ? "rotate the scene" : "perturb the film"
+        }`}
         onPointerDown={pointerDown}
         onPointerMove={pointerMove}
         onPointerUp={pointerEnd}
