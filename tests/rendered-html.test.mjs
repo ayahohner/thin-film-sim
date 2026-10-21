@@ -1,28 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { openWorkerArtifact } from "../scripts/worker-artifact.mjs";
 
 const developmentPreviewMeta =
   /<meta(?=[^>]*\bname=["']codex-preview["'])(?=[^>]*\bcontent=["']development["'])[^>]*>/i;
 
-test("renders development preview metadata", async () => {
-  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
-  workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
-  const { default: worker } = await import(workerUrl.href);
-
-  const response = await worker.fetch(
-    new Request("http://localhost/", {
-      headers: { accept: "text/html" },
-    }),
-    {
-      ASSETS: {
-        fetch: async () => new Response("Not found", { status: 404 }),
-      },
-    },
-    {
-      waitUntil() {},
-      passThroughOnException() {},
-    },
-  );
+test("renders development preview metadata", async (t) => {
+  const runtime = await openWorkerArtifact();
+  t.after(() => runtime.dispose());
+  const response = await runtime.dispatchFetch("http://localhost/", {
+    headers: { accept: "text/html" },
+  });
 
   assert.equal(response.status, 200);
   assert.match(
@@ -34,4 +22,9 @@ test("renders development preview metadata", async () => {
   assert.match(html, /aria-label="Bubble drag behavior"/);
   assert.match(html, />Perturb</);
   assert.match(html, />Rotate</);
+  const script = html.match(/<script[^>]+src="([^"]+)"/);
+  assert.ok(script, "Rendered page must reference its client bundle");
+  const asset = await runtime.dispatchFetch(new URL(script[1], "http://localhost/"));
+  assert.equal(asset.status, 200, "Client bundle must be available through ASSETS");
+  await asset.arrayBuffer();
 });
